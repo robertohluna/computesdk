@@ -132,15 +132,29 @@ const HTTP2_SESSION_COUNT = (() => {
     : 16;
 })();
 
+// Upper bound on how long a request waits for the first session to connect
+// before it is queued on a connecting session instead. Node queues streams on
+// a connecting session and flushes them on connect, so this only bounds the
+// wait itself; it never turns a slow handshake into a failure.
+const FIRST_READY_TIMEOUT_MS = 1000;
+
+// Retries for requests the server provably never processed (see
+// isSafeToRetry). Bounded so a pool that keeps refusing cannot loop.
+const HTTP2_MAX_RETRIES = 2;
+
+// RST_STREAM / GOAWAY error code REFUSED_STREAM (RFC 9113 section 7).
+const NGHTTP2_REFUSED_STREAM = 0x7;
+
 interface Http2SessionPool {
   sessions: import("node:http2").ClientHttp2Session[];
-  // Sessions whose TLS + HTTP/2 handshake has completed. Dispatching onto a
-  // session that has not connected yet makes the request pay that session's
-  // full handshake as first-byte latency - at burst start that is every
-  // request in the burst, serialized behind 16 cold connects.
+  // Sessions whose TLS + HTTP/2 handshake has completed and that still accept
+  // new streams. Requests are dispatched only onto these, so no request pays
+  // a handshake it did not have to.
   ready: Set<import("node:http2").ClientHttp2Session>;
-  firstReady: Promise<void>;
-  resolveFirstReady: () => void;
+  // Requests parked until any session connects (or every session fails).
+  waiters: Set<() => void>;
+  // Most recent handshake failure, surfaced when no session could connect.
+  connectError: Error | undefined;
   next: number;
   inFlight: number;
 }
@@ -182,32 +196,32 @@ function canUseNodeHttp2(url: URL): boolean {
   );
 }
 
+function isOpen(session: import("node:http2").ClientHttp2Session): boolean {
+  return !session.closed && !session.destroyed;
+}
+
+function wakeWaiters(pool: Http2SessionPool): void {
+  const waiters = Array.from(pool.waiters);
+  pool.waiters.clear();
+  for (const wake of waiters) wake();
+}
+
 async function ensureHttp2Sessions(origin: string): Promise<Http2SessionPool> {
   const http2 = await import("node:http2");
-  let resolveFirstReady: () => void = () => {};
-  const firstReady = new Promise<void>((resolve) => {
-    resolveFirstReady = resolve;
-  });
   const pool = http2SessionPools.get(origin) ?? {
     sessions: [],
     ready: new Set<import("node:http2").ClientHttp2Session>(),
-    firstReady,
-    resolveFirstReady,
+    waiters: new Set<() => void>(),
+    connectError: undefined,
     next: 0,
     inFlight: 0,
   };
-  // A fully-recycled pool (every session discarded) must re-arm the
-  // cold-start gate: the original firstReady stays resolved forever, so a
-  // later refill would otherwise skip the wait and land on cold sessions.
-  if (pool.sessions.length === 0 && pool.ready.size === 0) {
-    pool.firstReady = firstReady;
-    pool.resolveFirstReady = resolveFirstReady;
-  }
-  pool.sessions = pool.sessions.filter(
-    (candidate) => !candidate.closed && !candidate.destroyed,
-  );
+  pool.sessions = pool.sessions.filter(isOpen);
   http2SessionPools.set(origin, pool);
 
+  // Every session connects independently in the background. Requests never
+  // wait for the pool to fill: the first connected session starts serving
+  // and later sessions join the rotation as their handshakes complete.
   while (pool.sessions.length < HTTP2_SESSION_COUNT) {
     const session = http2.connect(origin);
     // Preconnected sessions start idle, so they must not hold the event loop.
@@ -221,8 +235,10 @@ async function ensureHttp2Sessions(origin: string): Promise<Http2SessionPool> {
     pool.sessions.push(session);
 
     session.once("connect", () => {
+      if (!isOpen(session)) return;
       pool.ready.add(session);
-      pool.resolveFirstReady();
+      pool.connectError = undefined;
+      wakeWaiters(pool);
     });
 
     const discard = () => {
@@ -230,9 +246,17 @@ async function ensureHttp2Sessions(origin: string): Promise<Http2SessionPool> {
       pool.sessions = pool.sessions.filter(
         (candidate) => candidate !== session,
       );
+      // Nothing left that could connect: release parked requests so they
+      // surface the failure now instead of waiting out the timeout.
+      if (pool.sessions.length === 0) wakeWaiters(pool);
     };
+    session.once("error", (error: Error) => {
+      if (!pool.ready.has(session)) pool.connectError = error;
+      discard();
+    });
     session.once("close", discard);
-    session.once("error", discard);
+    // After GOAWAY the session finishes its in-flight streams but refuses new
+    // ones, so it leaves the rotation immediately.
     session.once("goaway", discard);
   }
 
@@ -283,6 +307,124 @@ export function closeMiosaConnections(): void {
   http2SessionPools.clear();
 }
 
+function waitForReadySession(
+  pool: Http2SessionPool,
+  timeoutMs: number,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const wake = () => {
+      clearTimeout(timer);
+      pool.waiters.delete(wake);
+      resolve();
+    };
+    const timer = setTimeout(wake, timeoutMs);
+    pool.waiters.add(wake);
+  });
+}
+
+function readySessions(
+  pool: Http2SessionPool,
+): import("node:http2").ClientHttp2Session[] {
+  return Array.from(pool.ready).filter(isOpen);
+}
+
+async function acquireHttp2Session(
+  origin: string,
+  pool: Http2SessionPool,
+): Promise<import("node:http2").ClientHttp2Session> {
+  let ready = readySessions(pool);
+
+  if (ready.length === 0) {
+    // Replace sessions that failed or closed, then wait for whichever
+    // session connects first.
+    pool = await ensureHttp2Sessions(origin);
+    await waitForReadySession(pool, FIRST_READY_TIMEOUT_MS);
+    ready = readySessions(pool);
+    if (ready.length === 0 && pool.sessions.length === 0 && pool.connectError) {
+      // Every session failed its handshake (unreachable or misconfigured
+      // endpoint). Surface that error; the next request reconnects afresh.
+      throw pool.connectError;
+    }
+    if (ready.length === 0) pool = await ensureHttp2Sessions(origin);
+  }
+
+  // No session connected within the bound: queue on a connecting session.
+  // Node flushes the stream once that handshake completes.
+  const candidates = ready.length > 0 ? ready : pool.sessions;
+  const session = candidates[pool.next % candidates.length]!;
+  pool.next = (pool.next + 1) % Number.MAX_SAFE_INTEGER;
+  return session;
+}
+
+interface Http2AttemptError extends Error {
+  // The request never reached the server's application layer.
+  unprocessed?: boolean;
+}
+
+// A request is safe to resend when the server provably did not process it:
+// the session was already unusable when the stream was opened, or the server
+// refused the stream (REFUSED_STREAM, which is also how a GOAWAY rejects
+// streams above its last-stream-id). Idempotent methods are also resent after
+// any transport failure. A POST that may have reached the server is never
+// resent, because a duplicate create would leak a sandbox.
+function isSafeToRetry(
+  error: Http2AttemptError,
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+): boolean {
+  if (error.unprocessed) return true;
+  return method === "GET" || method === "DELETE";
+}
+
+function sendOnHttp2Session(
+  session: import("node:http2").ClientHttp2Session,
+  url: URL,
+  method: "GET" | "POST" | "PATCH" | "DELETE",
+  headers: Record<string, string>,
+  body?: string,
+): Promise<MiosaHttpResponse> {
+  return new Promise<MiosaHttpResponse>((resolve, reject) => {
+    let status = 0;
+    const chunks: Buffer[] = [];
+    let request: import("node:http2").ClientHttp2Stream;
+    try {
+      request = session.request({
+        ":method": method,
+        ":path": `${url.pathname}${url.search}`,
+        ...headers,
+        ...(body === undefined
+          ? {}
+          : { "content-length": Buffer.byteLength(body).toString() }),
+      });
+    } catch (error) {
+      // The session closed or received GOAWAY between selection and dispatch.
+      const attemptError = error as Http2AttemptError;
+      attemptError.unprocessed = true;
+      reject(attemptError);
+      return;
+    }
+
+    request.on("response", (responseHeaders) => {
+      status = Number(responseHeaders[":status"] ?? 0);
+    });
+    request.on("data", (chunk: Buffer | Uint8Array) => {
+      chunks.push(Buffer.from(chunk));
+    });
+    request.once("error", (error: Http2AttemptError) => {
+      if (request.rstCode === NGHTTP2_REFUSED_STREAM) error.unprocessed = true;
+      reject(error);
+    });
+    request.once("end", () => {
+      const responseBody = Buffer.concat(chunks).toString("utf8");
+      resolve({
+        ok: status >= 200 && status < 300,
+        status,
+        text: async () => responseBody,
+      });
+    });
+    request.end(body);
+  });
+}
+
 async function nodeHttp2Request(
   url: URL,
   method: "GET" | "POST" | "PATCH" | "DELETE",
@@ -295,67 +437,25 @@ async function nodeHttp2Request(
   if (pool.inFlight === 0) setPoolRef(pool, true);
   pool.inFlight += 1;
 
-  // Cold start: wait for the first connected session, then give the rest of
-  // the pool a short window (250ms cap) to reach a quorum so a concurrent
-  // burst spreads over warm connections instead of serializing behind
-  // handshakes. Steady state pays nothing: ready.size > 0 skips all of this.
-  // The first wait is BOUNDED (1s): if no session ever connects (unreachable
-  // or misconfigured endpoint), dispatch falls through to the legacy
-  // any-session path below and the request itself surfaces the connection
-  // error promptly, exactly as before this optimization - never a hang.
-  if (pool.ready.size === 0) {
-    let firstReadyTimer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      pool.firstReady,
-      new Promise<void>((resolve) => {
-        firstReadyTimer = setTimeout(resolve, 1000);
-      }),
-    ]);
-    if (firstReadyTimer !== undefined) clearTimeout(firstReadyTimer);
-    if (pool.ready.size > 0) {
-      const quorum = Math.min(8, pool.sessions.length);
-      const deadline = Date.now() + 250;
-      while (pool.ready.size < quorum && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 10));
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      const session = await acquireHttp2Session(
+        origin,
+        http2SessionPools.get(origin) ?? (await ensureHttp2Sessions(origin)),
+      );
+      try {
+        return await sendOnHttp2Session(session, url, method, headers, body);
+      } catch (error) {
+        if (
+          attempt >= HTTP2_MAX_RETRIES ||
+          !isSafeToRetry(error as Http2AttemptError, method)
+        ) {
+          throw error;
+        }
+        // A closed or GOAWAY'd session already left the rotation through its
+        // event listeners; a healthy session that reset one stream stays.
       }
     }
-  }
-
-  const candidates =
-    pool.ready.size > 0 ? Array.from(pool.ready) : pool.sessions;
-  const session = candidates[pool.next % candidates.length]!;
-  pool.next = (pool.next + 1) % candidates.length;
-
-  try {
-    return await new Promise<MiosaHttpResponse>((resolve, reject) => {
-      let status = 0;
-      const chunks: Buffer[] = [];
-      const request = session.request({
-        ":method": method,
-        ":path": `${url.pathname}${url.search}`,
-        ...headers,
-        ...(body === undefined
-          ? {}
-          : { "content-length": Buffer.byteLength(body).toString() }),
-      });
-
-      request.on("response", (responseHeaders) => {
-        status = Number(responseHeaders[":status"] ?? 0);
-      });
-      request.on("data", (chunk: Buffer | Uint8Array) => {
-        chunks.push(Buffer.from(chunk));
-      });
-      request.once("error", reject);
-      request.once("end", () => {
-        const responseBody = Buffer.concat(chunks).toString("utf8");
-        resolve({
-          ok: status >= 200 && status < 300,
-          status,
-          text: async () => responseBody,
-        });
-      });
-      request.end(body);
-    });
   } finally {
     pool.inFlight -= 1;
     if (pool.inFlight <= 0) {
