@@ -38,6 +38,7 @@ const fakeHttp2 = vi.hoisted(() => {
 
   class FakeStream extends Emitter {
     refused = false;
+    rstCode = 0;
     constructor(readonly session: FakeSession) {
       super();
     }
@@ -61,17 +62,22 @@ const fakeHttp2 = vi.hoisted(() => {
       this.streams.push(stream);
       return stream;
     }
-    connect(): void {
+    // Completes the handshake; by default the peer's SETTINGS follow at once.
+    connect({ settings = true }: { settings?: boolean } = {}): void {
       this.connected = true;
       this.emit("connect");
+      if (settings) this.sendSettings();
+      this.flush();
+    }
+    sendSettings(): void {
       this.remoteSettings = { maxConcurrentStreams: state.limit };
       this.emit("remoteSettings", this.remoteSettings);
-      this.flush();
     }
     flush(): void {
       for (const stream of this.pending.splice(0)) {
         if (this.open >= state.limit) {
           stream.refused = true;
+          stream.rstCode = 7; // NGHTTP2_REFUSED_STREAM
           setImmediate(() => {
             const error = Object.assign(
               new Error("Stream closed with error code NGHTTP2_REFUSED_STREAM"),
@@ -84,7 +90,7 @@ const fakeHttp2 = vi.hoisted(() => {
         }
         this.open += 1;
         this.peakOpen = Math.max(this.peakOpen, this.open);
-        setImmediate(() => {
+        state.respond(() => {
           this.open -= 1;
           stream.emit("response", { ":status": 200 });
           stream.emit(
@@ -111,9 +117,20 @@ const fakeHttp2 = vi.hoisted(() => {
   }
 
   const sessions: FakeSession[] = [];
+  const held: Array<() => void> = [];
   const state = {
     sessions,
     limit: 100,
+    // When true, accepted streams stay open until release() is called.
+    hold: false,
+    respond(answer: () => void): void {
+      if (state.hold) held.push(answer);
+      else setImmediate(answer);
+    },
+    release(): void {
+      state.hold = false;
+      for (const answer of held.splice(0)) setImmediate(answer);
+    },
     connect: (): FakeSession => {
       const session = new FakeSession();
       sessions.push(session);
@@ -477,6 +494,7 @@ describe("miosa provider", () => {
         process.env.NODE_ENV = "production";
         fakeHttp2.sessions.length = 0;
         fakeHttp2.limit = 100;
+        fakeHttp2.release();
       });
 
       afterEach(() => {
@@ -576,6 +594,55 @@ describe("miosa provider", () => {
         expect(
           connected.filter((session) => session.streams.length > 0).length,
         ).toBeGreaterThan(1);
+      });
+
+      it("should spread a cold burst across sessions while the pool is connecting", async () => {
+        fakeHttp2.hold = true;
+        const provider = miosa({ apiKey: API_KEY, baseUrl });
+        const pending = Promise.all(
+          Array.from({ length: 20 }, () => provider.sandbox.getById("sbx-1")),
+        );
+        await settle(() => fakeHttp2.sessions.length > 0);
+        const [first, second, third] = fakeHttp2.sessions;
+
+        first!.connect();
+        await settle(() => streamsOpened() >= 8);
+        expect(streamsOpened()).toBe(8);
+
+        second!.connect();
+        await settle(() => streamsOpened() >= 16);
+        third!.connect();
+        await settle(() => streamsOpened() >= 20);
+
+        expect(
+          [first, second, third].map((session) => session!.streams.length),
+        ).toEqual([8, 8, 4]);
+        fakeHttp2.release();
+        const results = await pending;
+        expect(results.every((result) => result?.sandboxId === "sbx-1")).toBe(
+          true,
+        );
+      });
+
+      it("should resend requests refused before the server's SETTINGS arrived", async () => {
+        fakeHttp2.limit = 2;
+        const provider = miosa({ apiKey: API_KEY, baseUrl });
+        const pending = Promise.allSettled(
+          Array.from({ length: 5 }, () => provider.sandbox.getById("sbx-1")),
+        );
+        await settle(() => fakeHttp2.sessions.length > 0);
+        const first = fakeHttp2.sessions[0]!;
+
+        first.connect({ settings: false });
+        await settle(() => first.streams.some((stream) => stream.refused));
+        first.sendSettings();
+        const results = await pending;
+
+        expect(
+          results.filter((result) => result.status === "rejected"),
+        ).toEqual([]);
+        expect(first.streams.filter((stream) => stream.refused).length).toBe(3);
+        expect(first.peakOpen).toBeLessThanOrEqual(2);
       });
 
       it("should round-robin across connected sessions", async () => {
