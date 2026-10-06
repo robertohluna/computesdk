@@ -14,6 +14,8 @@
   * [Archil](providers/archil.md)
   * [Beam](providers/beam.md)
   * [Blaxel](providers/blaxel.md)
+  * [Brezel](providers/brezel.md)
+  * [Buddy](providers/buddy.md)
   * [Cloud Run](providers/cloud-run.md)
   * [Cloudflare](providers/cloudflare.md)
   * [CodeSandbox](providers/codesandbox.md)
@@ -24,6 +26,8 @@
   * [Docker](providers/docker.md)
   * [E2B](providers/e2b.md)
   * [Freestyle](providers/freestyle.md)
+  * [givemeanode](providers/givemeanode.md)
+  * [GravixLayer](providers/gravixlayer.md)
   * [HopX](providers/hopx.md)
   * [Isorun](providers/isorun.md)
   * [Just Bash](providers/just-bash.md)
@@ -32,15 +36,19 @@
   * [Lelantos](providers/lelantos.md)
   * [Lightning](providers/lightning.md)
   * [Modal](providers/modal.md)
+  * [Microsandbox](providers/microsandbox.md)
+  * [MIOSA](providers/miosa.md)
   * [Mosaic](providers/mosaic.md)
   * [Namespace](providers/namespace.md)
   * [NeevCloud](providers/neevcloud.md)
   * [Northflank](providers/northflank.md)
+  * [Novita](providers/novita.md)
   * [OpenComputer](providers/opencomputer.md)
   * [Quilt](providers/quilt.md)
   * [Railway](providers/railway.md)
   * [Run Cloud](providers/run-cloud.md)
   * [Runloop](providers/runloop.md)
+  * [Runtime](providers/runtime.md)
   * [Sail](providers/sail.md)
   * [Sandbox0](providers/sandbox0.md)
   * [Secure Exec](providers/secure-exec.md)
@@ -50,6 +58,14 @@
   * [Tensorlake](providers/tensorlake.md)
   * [Upstash](providers/upstash.md)
   * [Vercel](providers/vercel.md)
+
+## Platform
+
+* [Overview](platform/README.md)
+* [CLI reference](platform/cli.md)
+* [Actions](platform/actions.md)
+* [Benchmarks](platform/benchmarks.md)
+* [API reference](platform/api-reference.md)
 
 ## Reference
 

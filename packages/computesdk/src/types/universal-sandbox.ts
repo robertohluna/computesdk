@@ -71,6 +71,49 @@ export interface RunCommandOptions {
 }
 
 /**
+ * Options for starting an interactive long-running process.
+ */
+export interface StartProcessOptions {
+  cwd?: string;
+  env?: Record<string, string>;
+  /** Open a writable stdin pipe. Default false. */
+  stdin?: boolean;
+  onStdout?: (chunk: string) => void;
+  onStderr?: (chunk: string) => void;
+  onExit?: (result: { exitCode: number | null; signal: string | null }) => void;
+  /** Interval for the status-polling fallback used when the daemon's SSE port is not reachable. Default 500. */
+  pollIntervalMs?: number;
+}
+
+/**
+ * Snapshot of a running or exited process started via `startProcess`.
+ */
+export interface ProcessStatus {
+  status: 'running' | 'exited';
+  exitCode: number | null;
+  signal: string | null;
+  stdout: string;
+  stderr: string;
+  truncated?: boolean;
+}
+
+/**
+ * Handle to an interactive process started via `startProcess`.
+ */
+export interface ProcessHandle {
+  readonly pid: number | null;
+  readonly jobId: string;
+  /** Write to stdin. Rejects if the process was not started with `stdin: true` or has exited. */
+  write(data: string | Uint8Array): Promise<void>;
+  closeStdin(): Promise<void>;
+  /** Current snapshot (daemond `status`). */
+  status(): Promise<ProcessStatus>;
+  /** Resolve when the process exits (daemond `wait`). Rejects with a `daemond:`-prefixed error if `timeout` elapses first. */
+  wait(options?: { timeout?: number }): Promise<CommandResult & { signal: string | null }>;
+  kill(signal?: string): Promise<void>;
+}
+
+/**
  * Snapshot information
  */
 export interface Snapshot {
@@ -137,6 +180,8 @@ export interface SandboxResourceOptions {
   memoryMb?: number;
   /** Disk size in MiB (Isorun). */
   diskMiB?: number;
+  /** Root disk size in MB (Tensorlake). `ephemeralDiskMb` is also accepted. */
+  diskMb?: number;
   /**
    * Vercel resource overrides. Vercel only exposes vCPU control; memory is
    * derived from the vCPU count.
@@ -194,6 +239,19 @@ export interface VercelSandboxResources {
  * read additional provider-specific keys via the index signature.
  */
 export interface CreateSandboxOptions extends SandboxResourceOptions {
+  /**
+   * Select the provider's ephemeral compute surface when it offers both
+   * ephemeral and persistent sandboxes.
+   *
+   * - `true`: lightweight/ephemeral surface — Upstash `EphemeralBox`,
+   *   Archil serverless exec, Cloud Run `sandbox do`.
+   * - `false`: durable VM/sandbox — Upstash `Box`, Archil persistent
+   *   sandbox, Cloud Run stateful session.
+   * - unset: the provider's configured default.
+   *
+   * Providers that offer only one surface ignore this field.
+   */
+  ephemeral?: boolean;
   timeout?: number;
   /** Provider-agnostic template/image ID to boot from */
   templateId?: string;
@@ -256,6 +314,14 @@ export interface Sandbox {
    * The provider/server handles shell invocation and execution details.
    */
   runCommand(command: string, options?: RunCommandOptions): Promise<CommandResult>;
+  
+  /**
+   * Start an interactive long-running process.
+   *
+   * Runs `sh -lc <command>` via the in-sandbox daemon, returning a handle for
+   * stdin writes, status snapshots, output callbacks, and wait/kill control.
+   */
+  startProcess(command: string, options?: StartProcessOptions): Promise<ProcessHandle>;
   
   /** Get information about the sandbox */
   getInfo(): Promise<SandboxInfo>;

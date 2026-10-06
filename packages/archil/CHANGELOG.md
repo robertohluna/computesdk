@@ -1,5 +1,104 @@
 # @computesdk/archil
 
+## 0.4.16
+
+### Patch Changes
+
+- ecde591: Fix snapshot handling in the Blaxel, Archil, and Namespace providers
+
+  - `@computesdk/blaxel`: `sandbox.create({ snapshotId })` now forks a new
+    sandbox from the workspace snapshot via `Snapshot.get(id).fork(...)`
+    instead of treating the id as a live sandbox (`sandboxId` still resumes a
+    live sandbox). The snapshot manager now maps to Blaxel's real snapshot
+    resources (`Snapshot.create/list/delete`, `sandbox.snapshots`) instead of
+    treating sandbox instances as snapshots.
+  - `@computesdk/archil`: `sandbox.create({ snapshotId })` forks a new sandbox
+    from the source sandbox via `POST /api/sandboxes/{id}/fork` (persistent
+    mode); `sandboxId` attaches to a live sandbox or disk. Added a snapshot
+    manager where `create` forks the source sandbox and `delete` removes the
+    backing sandbox (snapshot listing is unsupported — Archil has no snapshot
+    resource).
+  - `@computesdk/namespace`: `sandbox.create({ snapshotId })` restores
+    filesystem state by attaching a new PERSISTENT volume seeded via
+    `VolumeRequest.from_snapshot_id` (mounted at `/computesdk-data`). Added a
+    snapshot manager over the `StorageService` API: `list` enumerates
+    persistent-volume snapshots and `delete` abandons one. `create` throws —
+    Namespace snapshots are captured automatically on instance shutdown, never
+    on demand.
+
+## 0.4.15
+
+### Patch Changes
+
+- computesdk@4.1.8
+- @computesdk/provider@2.1.9
+
+## 0.4.14
+
+### Patch Changes
+
+- Updated dependencies [7e65fe7]
+  - @computesdk/provider@2.1.8
+  - computesdk@4.1.7
+
+## 0.4.13
+
+### Patch Changes
+
+- 0732fed: Add `execution: "persistent"` mode to the Archil provider: `create` provisions a
+  persistent Archil sandbox VM (waited to `running`), `runCommand` uses the
+  sandbox's interactive process API over a short-lived WebSocket connection
+  (fresh connection URL per command), `getById` auto-resumes paused sandboxes,
+  `destroy` deletes the sandbox, and `getUrl` resolves published endpoints.
+  Default `execution: "exec"` behavior is unchanged.
+
+  Also adds `ephemeral?: boolean` to the shared `CreateSandboxOptions` as the
+  standard flag for providers with both ephemeral and persistent compute
+  surfaces, and wires it through every dual-mode provider:
+
+  - Archil: `ephemeral: true` -> exec-mode disk handle, `false` -> persistent VM.
+  - Upstash: `ephemeral` -> `EphemeralBox`/`Box` (unchanged semantics, now typed).
+  - Cloud Run: `ephemeral` overrides configured `executionMode` per sandbox
+    (`true` -> `ephemeral`, `false` -> `stateful`).
+  - Freestyle: `ephemeral` overrides configured `persistent` per sandbox
+    (`true` -> deleted on stop, `false` -> kept).
+
+- Updated dependencies [0732fed]
+  - computesdk@4.1.6
+  - @computesdk/provider@2.1.7
+
+## 0.4.12
+
+### Patch Changes
+
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - @computesdk/provider@2.1.6
+
+## 0.4.11
+
+### Patch Changes
+
+- 4e6aec8: feat(archil): use the official `disk` client instead of hand-rolled fetch calls
+
+  Replaces the provider's bespoke `callApi` helper with Archil's official `disk`
+  package (`^1.1.2`), so auth headers, response envelopes, and endpoint paths are
+  maintained upstream rather than duplicated here.
+
+## 0.4.10
+
+### Patch Changes
+
+- 3a3cfa7: Support large filesystem reads, chunk large writes, and reject writes to directory paths.
+
+## 0.4.9
+
+### Patch Changes
+
+- 0f3660c: perf(archil): skip disk lookup on create
+
+  `provider.sandbox.create()` no longer fetches the disk before returning, and `getInfo()` derives metadata from the disk handle when full disk metadata is not available.
+
 ## 0.4.8
 
 ### Patch Changes

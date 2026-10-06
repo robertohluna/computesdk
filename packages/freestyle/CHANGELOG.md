@@ -1,5 +1,83 @@
 # @computesdk/freestyle
 
+## 0.2.5
+
+### Patch Changes
+
+- computesdk@4.1.8
+- @computesdk/provider@2.1.9
+
+## 0.2.4
+
+### Patch Changes
+
+- Updated dependencies [7e65fe7]
+  - @computesdk/provider@2.1.8
+  - computesdk@4.1.7
+
+## 0.2.3
+
+### Patch Changes
+
+- 0732fed: Add `execution: "persistent"` mode to the Archil provider: `create` provisions a
+  persistent Archil sandbox VM (waited to `running`), `runCommand` uses the
+  sandbox's interactive process API over a short-lived WebSocket connection
+  (fresh connection URL per command), `getById` auto-resumes paused sandboxes,
+  `destroy` deletes the sandbox, and `getUrl` resolves published endpoints.
+  Default `execution: "exec"` behavior is unchanged.
+
+  Also adds `ephemeral?: boolean` to the shared `CreateSandboxOptions` as the
+  standard flag for providers with both ephemeral and persistent compute
+  surfaces, and wires it through every dual-mode provider:
+
+  - Archil: `ephemeral: true` -> exec-mode disk handle, `false` -> persistent VM.
+  - Upstash: `ephemeral` -> `EphemeralBox`/`Box` (unchanged semantics, now typed).
+  - Cloud Run: `ephemeral` overrides configured `executionMode` per sandbox
+    (`true` -> `ephemeral`, `false` -> `stateful`).
+  - Freestyle: `ephemeral` overrides configured `persistent` per sandbox
+    (`true` -> deleted on stop, `false` -> kept).
+
+- Updated dependencies [0732fed]
+  - computesdk@4.1.6
+  - @computesdk/provider@2.1.7
+
+## 0.2.2
+
+### Patch Changes
+
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - @computesdk/provider@2.1.6
+
+## 0.2.1
+
+### Patch Changes
+
+- 8c037f3: Resolve the runtime snapshot on the create instead of looking it up first.
+
+  Every cold `create` began by paging `vms.snapshots.list` to find the
+  `computesdk-freestyle-runtime` snapshot by slug, and only then booted a VM. The
+  Freestyle API already resolves `snapshotId` from an id, your own slug, or a
+  public `{owner}/{slug}`, so that lookup was a round trip for something the
+  create could do itself — and it landed in the worst place, since concurrent
+  sandboxes all waited on the one shared lookup before any of them could start.
+
+  `create` now names the snapshot by slug and boots straight away. The bake still
+  happens, once, if the API answers `NOT_FOUND` — the existing in-flight promise
+  keeps a burst of misses from baking a snapshot each, and the slug persists the
+  result across processes.
+
+  Measured against the live API from a client one continent away, the lookup was
+  worth ~100ms on every sandbox in a burst.
+
+- 01733f6: Update the Freestyle SDK dependency to ^0.2.11.
+
+## 0.2.0
+
+### Minor Changes
+
+- 21fb6ed: Rebuild the Freestyle provider on the current `freestyle` SDK (the `freestyle-sandboxes` package it used is no longer maintained). The first sandbox on an account bakes a Node + Python runtime snapshot once and caches it (override with `snapshotId` / `FREESTYLE_SNAPSHOT_ID`); every sandbox after boots in ~200–300 ms. Commands run as root, so `HOME`, `apt`, `npm`, and `pip` work. Adds `snapshotId`, `baseUrl`, `idleTimeoutSeconds`, `persistent`, and `firewall` config options. `getUrl` is unsupported — Freestyle exposes VMs through mapped domains, not a stock per-port URL.
+
 ## 0.1.12
 
 ### Patch Changes

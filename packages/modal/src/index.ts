@@ -6,7 +6,7 @@ import { defineProvider, escapeShellArg } from '@computesdk/provider';
 
 import type { CommandResult, SandboxInfo, CreateSandboxOptions, FileEntry, RunCommandOptions } from '@computesdk/provider';
 
-import { ModalClient } from 'modal';
+import { ModalClient, SandboxFilesystemNotFoundError } from 'modal';
 import type { Sandbox, App, Image, SandboxCreateParams } from 'modal';
 
 type ModalNativeSandbox = Sandbox;
@@ -46,12 +46,10 @@ export interface ModalConfig {
   ports?: number[];
   daemonSsePort?: number | false;
   appName?: string;
-  scalableSandboxes?: boolean;
 }
 
 export interface ModalCreateSandboxOptions extends CreateSandboxOptions {
   daemonSsePort?: number | false;
-  scalableSandboxes?: boolean;
 }
 
 /**
@@ -68,6 +66,57 @@ interface ModalInternalConfig extends ModalConfig {
 interface ModalSandbox {
   sandbox: ModalNativeSandbox;
   sandboxId: string;
+}
+
+/** The framework-supplied command runner handed to filesystem callbacks. */
+type CommandRunner = (
+  sandbox: ModalSandbox,
+  command: string,
+  options?: RunCommandOptions,
+) => Promise<CommandResult>;
+
+const FALLBACK_WORKDIR = '/';
+
+/** Cached `pwd` probes: relative filesystem paths resolve against the cwd a
+ *  `runCommand` exec would use, so `writeFile('a.txt')` and `cat a.txt` agree. */
+const workdirs = new WeakMap<ModalSandbox, Promise<string>>();
+
+function workdirOf(sandbox: ModalSandbox, runCommand: CommandRunner): Promise<string> {
+  let probe = workdirs.get(sandbox);
+  if (!probe) {
+    probe = runCommand(sandbox, 'pwd').then((result) => {
+      const dir = result.stdout.trim();
+      if (result.exitCode === 0 && dir.startsWith('/')) return dir;
+      // runCommand reports exec failures as results, not rejections, so a
+      // transient failure must not pin the workdir to the fallback forever —
+      // evict and let the next filesystem op probe again.
+      workdirs.delete(sandbox);
+      return FALLBACK_WORKDIR;
+    });
+    workdirs.set(sandbox, probe);
+    probe.catch(() => workdirs.delete(sandbox));
+  }
+  return probe;
+}
+
+/** Join `path` onto the sandbox workdir. Absolute paths pass through and skip
+ *  the probe; empty and `.` segments are dropped; `..` segments are preserved
+ *  for the sandbox filesystem to resolve physically — collapsing them
+ *  lexically would mis-resolve when a preceding component is a symlink. */
+async function resolveSandboxPath(
+  sandbox: ModalSandbox,
+  path: string,
+  runCommand: CommandRunner,
+): Promise<string> {
+  const combined = path.startsWith('/')
+    ? path
+    : `${await workdirOf(sandbox, runCommand)}/${path}`;
+  const segments: string[] = [];
+  for (const segment of combined.split('/')) {
+    if (segment === '' || segment === '.') continue;
+    segments.push(segment);
+  }
+  return `/${segments.join('/')}`;
 }
 
 const _modal = defineProvider<ModalSandbox, ModalInternalConfig>({
@@ -93,7 +142,6 @@ const _modal = defineProvider<ModalSandbox, ModalInternalConfig>({
             directory: _directory,
             ports: optPorts,
             daemonSsePort: optDaemonSsePort,
-            scalableSandboxes: optScalableSandboxes,
             ...providerOptions
           } = modalOptions;
 
@@ -122,10 +170,7 @@ const _modal = defineProvider<ModalSandbox, ModalInternalConfig>({
           if (envs && Object.keys(envs).length > 0) sandboxOptions.env = envs;
           if (name) sandboxOptions.name = name;
 
-          const useScalableSandboxes = optScalableSandboxes ?? config.scalableSandboxes ?? false;
-          const sandbox = useScalableSandboxes
-            ? await client.sandboxes.experimentalCreate(app, image, sandboxOptions)
-            : await client.sandboxes.create(app, image, sandboxOptions);
+          const sandbox = await client.sandboxes.create(app, image, sandboxOptions);
           const sandboxId = sandbox.sandboxId;
 
           return { sandbox: { sandbox, sandboxId }, sandboxId };
@@ -212,62 +257,67 @@ const _modal = defineProvider<ModalSandbox, ModalInternalConfig>({
       },
 
       filesystem: {
-        readFile: async (modalSandbox: ModalSandbox, path: string): Promise<string> => {
+        readFile: async (modalSandbox: ModalSandbox, path: string, runCommand: CommandRunner): Promise<string> => {
+          const resolved = await resolveSandboxPath(modalSandbox, path, runCommand);
           try {
-            const file = await modalSandbox.sandbox.open(path);
-            try {
-              const data = await file.read();
-              const content = new TextDecoder().decode(data);
-              return content;
-            } finally {
-              await file.close();
-            }
+            return await modalSandbox.sandbox.filesystem.readText(resolved);
           } catch (error) {
-            try {
-              const process = await modalSandbox.sandbox.exec(['cat', path], { stdout: 'pipe', stderr: 'pipe' });
-              const [content, stderr, exitCode] = await Promise.all([process.stdout.readText(), process.stderr.readText(), process.wait()]);
-              if (exitCode !== 0) throw new Error(`cat failed: ${stderr}`);
-              return content.trim();
-            } catch {
-              throw new Error(`Failed to read file ${path}: ${error instanceof Error ? error.message : String(error)}`);
-            }
+            throw new Error(`Failed to read file ${path}: ${error instanceof Error ? error.message : String(error)}`);
           }
         },
-        writeFile: async (modalSandbox: ModalSandbox, path: string, content: string): Promise<void> => {
-          const file = await modalSandbox.sandbox.open(path, 'w');
+        writeFile: async (modalSandbox: ModalSandbox, path: string, content: string, runCommand: CommandRunner): Promise<void> => {
+          const resolved = await resolveSandboxPath(modalSandbox, path, runCommand);
           try {
-            await file.write(new TextEncoder().encode(content));
-          } finally {
-            await file.close();
+            await modalSandbox.sandbox.filesystem.writeText(content, resolved);
+          } catch (error) {
+            throw new Error(`Failed to write file ${path}: ${error instanceof Error ? error.message : String(error)}`);
           }
         },
-        mkdir: async (modalSandbox: ModalSandbox, path: string): Promise<void> => {
-          const process = await modalSandbox.sandbox.exec(['mkdir', '-p', path], { stdout: 'pipe', stderr: 'pipe' });
-          const [, stderr, exitCode] = await Promise.all([process.stdout.readText(), process.stderr.readText(), process.wait()]);
-          if (exitCode !== 0) throw new Error(`mkdir failed: ${stderr}`);
+        mkdir: async (modalSandbox: ModalSandbox, path: string, runCommand: CommandRunner): Promise<void> => {
+          const resolved = await resolveSandboxPath(modalSandbox, path, runCommand);
+          try {
+            await modalSandbox.sandbox.filesystem.makeDirectory(resolved, { createParents: true });
+          } catch (error) {
+            throw new Error(`mkdir failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
         },
-        readdir: async (modalSandbox: ModalSandbox, path: string): Promise<FileEntry[]> => {
-          const process = await modalSandbox.sandbox.exec(['ls', '-la', path], { stdout: 'pipe', stderr: 'pipe' });
-          const [output, stderr, exitCode] = await Promise.all([process.stdout.readText(), process.stderr.readText(), process.wait()]);
-          if (exitCode !== 0) throw new Error(`ls failed: ${stderr}`);
-          const lines = output.split('\n').slice(1);
-          return lines.filter((l: string) => l.trim()).map((line: string) => {
-            const parts = line.trim().split(/\s+/);
-            const permissions = parts[0] || '';
-            const size = parseInt(parts[4]) || 0;
-            const dateStr = (parts[5] || '') + ' ' + (parts[6] || '');
-            const date = dateStr.trim() ? new Date(dateStr) : new Date();
-            const name = parts.slice(8).join(' ') || parts[parts.length - 1] || 'unknown';
-            return { name, type: permissions.startsWith('d') ? 'directory' as const : 'file' as const, size, modified: isNaN(date.getTime()) ? new Date() : date };
-          });
+        readdir: async (modalSandbox: ModalSandbox, path: string, runCommand: CommandRunner): Promise<FileEntry[]> => {
+          const resolved = await resolveSandboxPath(modalSandbox, path, runCommand);
+          try {
+            const entries = await modalSandbox.sandbox.filesystem.listFiles(resolved);
+            return entries.map((entry) => ({
+              name: entry.name,
+              type: entry.type === 'directory' ? 'directory' as const : 'file' as const,
+              size: entry.size,
+              modified: new Date(entry.modifiedTime * 1000),
+            }));
+          } catch (error) {
+            throw new Error(`ls failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
         },
-        exists: async (modalSandbox: ModalSandbox, path: string): Promise<boolean> => {
-          try { const process = await modalSandbox.sandbox.exec(['test', '-e', path]); return await process.wait() === 0; } catch { return false; }
+        exists: async (modalSandbox: ModalSandbox, path: string, runCommand: CommandRunner): Promise<boolean> => {
+          const resolved = await resolveSandboxPath(modalSandbox, path, runCommand);
+          try {
+            await modalSandbox.sandbox.filesystem.stat(resolved);
+            return true;
+          } catch (error) {
+            if (error instanceof SandboxFilesystemNotFoundError) return false;
+            throw error;
+          }
         },
-        remove: async (modalSandbox: ModalSandbox, path: string): Promise<void> => {
-          const process = await modalSandbox.sandbox.exec(['rm', '-rf', path], { stdout: 'pipe', stderr: 'pipe' });
-          const [, stderr, exitCode] = await Promise.all([process.stdout.readText(), process.stderr.readText(), process.wait()]);
-          if (exitCode !== 0) throw new Error(`rm failed: ${stderr}`);
+        remove: async (modalSandbox: ModalSandbox, path: string, runCommand: CommandRunner): Promise<void> => {
+          // An empty or dot-only path would resolve to the workdir itself —
+          // refuse it rather than recursively delete the sandbox's whole cwd.
+          if (path.split('/').every((s) => s === '' || s === '.')) {
+            throw new Error(`remove: refusing ambiguous path: ${JSON.stringify(path)}`);
+          }
+          const resolved = await resolveSandboxPath(modalSandbox, path, runCommand);
+          try {
+            await modalSandbox.sandbox.filesystem.remove(resolved, { recursive: true });
+          } catch (error) {
+            if (error instanceof SandboxFilesystemNotFoundError) return;
+            throw new Error(`rm failed: ${error instanceof Error ? error.message : String(error)}`);
+          }
         }
       },
 

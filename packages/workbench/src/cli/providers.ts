@@ -31,12 +31,15 @@ const SHARED_PROVIDER_NAMES = [
   'collimate',
   'lelantos',
   'tenki',
+  'microsandbox',
+  'novita',
 ] as const;
 
 type SharedProviderName = typeof SHARED_PROVIDER_NAMES[number];
 
 const SHARED_PROVIDER_AUTH: Record<SharedProviderName, readonly (readonly string[])[]> = {
   e2b: [['E2B_API_KEY']],
+  novita: [['NOVITA_API_KEY']],
   daytona: [['DAYTONA_API_KEY']],
   modal: [['MODAL_TOKEN_ID', 'MODAL_TOKEN_SECRET']],
   runloop: [['RUNLOOP_API_KEY']],
@@ -45,8 +48,8 @@ const SHARED_PROVIDER_AUTH: Record<SharedProviderName, readonly (readonly string
     ['VERCEL_OIDC_TOKEN'],
   ],
   cloudflare: [
+    ['CLOUDFLARE_SANDBOX_URL', 'CLOUDFLARE_SANDBOX_API_KEY'],
     ['CLOUDFLARE_SANDBOX_URL', 'CLOUDFLARE_SANDBOX_SECRET'],
-    ['CLOUDFLARE_API_TOKEN', 'CLOUDFLARE_ACCOUNT_ID'],
   ],
   'cloud-run': [[]],
   beam: [['BEAM_TOKEN', 'BEAM_WORKSPACE_ID']],
@@ -69,12 +72,16 @@ const SHARED_PROVIDER_AUTH: Record<SharedProviderName, readonly (readonly string
   // key alone counts as configured.
   lelantos: [['LELANTOS_API_KEY'], ['E2B_API_KEY']],
   tenki: [['TENKI_API_KEY'], ['TENKI_AUTH_TOKEN']],
+  // Cloud is the default, and it can authenticate with either a direct key or
+  // a named SDK profile.
+  microsandbox: [['MSB_API_KEY'], ['MSB_PROFILE']],
 };
 
 // Each config key maps to an env var name, or — when a provider accepts
 // fallbacks — an ordered list of env var names tried first-match-wins.
 const PROVIDER_ENV_MAP: Record<SharedProviderName, Record<string, string | readonly string[]>> = {
   e2b: { apiKey: 'E2B_API_KEY' },
+  novita: { apiKey: 'NOVITA_API_KEY' },
   daytona: { apiKey: 'DAYTONA_API_KEY' },
   modal: { tokenId: 'MODAL_TOKEN_ID', tokenSecret: 'MODAL_TOKEN_SECRET' },
   runloop: { apiKey: 'RUNLOOP_API_KEY' },
@@ -85,7 +92,7 @@ const PROVIDER_ENV_MAP: Record<SharedProviderName, Record<string, string | reado
   },
   cloudflare: {
     sandboxUrl: 'CLOUDFLARE_SANDBOX_URL',
-    sandboxSecret: 'CLOUDFLARE_SANDBOX_SECRET',
+    sandboxApiKey: ['CLOUDFLARE_SANDBOX_API_KEY', 'CLOUDFLARE_SANDBOX_SECRET'],
   },
   'cloud-run': { sandboxUrl: 'CLOUD_RUN_SANDBOX_URL', sandboxSecret: 'CLOUD_RUN_SANDBOX_SECRET', gatewayAuthToken: 'CLOUD_RUN_AUTH_TOKEN', sandboxBinary: 'CLOUD_RUN_SANDBOX_BINARY' },
   beam: { token: 'BEAM_TOKEN', workspaceId: 'BEAM_WORKSPACE_ID' },
@@ -110,6 +117,7 @@ const PROVIDER_ENV_MAP: Record<SharedProviderName, Record<string, string | reado
     apiUrl: ['LELANTOS_API_URL', 'E2B_API_URL'],
   },
   tenki: { apiKey: 'TENKI_API_KEY', baseUrl: 'TENKI_API_URL', workspaceId: 'TENKI_WORKSPACE_ID' },
+  microsandbox: { apiKey: 'MSB_API_KEY', apiUrl: 'MSB_API_URL', profile: 'MSB_PROFILE' },
 };
 
 function getProviderConfigFromEnv(provider: SharedProviderName): Record<string, string> {
@@ -122,6 +130,17 @@ function getProviderConfigFromEnv(provider: SharedProviderName): Record<string, 
       if (value) { config[configKey] = value; break; }
     }
   }
+
+  if (provider === 'microsandbox') {
+    // The SDK treats key-based auth and profile auth as mutually exclusive.
+    // Prefer the explicit key, including its optional endpoint, when both are set.
+    if (config.apiKey) {
+      delete config.profile;
+    } else if (config.profile) {
+      delete config.apiUrl;
+    }
+  }
+
   return config;
 }
 
@@ -334,6 +353,8 @@ export async function loadProvider(providerName: ProviderName): Promise<any> {
     switch (providerName) {
       case 'e2b':
         return await import('@computesdk/e2b');
+      case 'novita':
+        return await import('@computesdk/novita');
       case 'daytona':
         return await import('@computesdk/daytona');
       case 'modal':
@@ -344,7 +365,6 @@ export async function loadProvider(providerName: ProviderName): Promise<any> {
       case 'vercel':
         return await import('@computesdk/vercel');
       case 'cloudflare':
-        // @ts-ignore - @cloudflare/sandbox types may not be available
         return await import('@computesdk/cloudflare');
       case 'cloud-run':
         return await import('@computesdk/cloud-run');
@@ -390,6 +410,9 @@ export async function loadProvider(providerName: ProviderName): Promise<any> {
       case 'tenki':
         // @ts-ignore - package type declarations may be unavailable in local workbench typecheck
         return await import('@computesdk/tenki');
+      case 'microsandbox':
+        // @ts-ignore - package type declarations may be unavailable in local workbench typecheck
+        return await import('@computesdk/microsandbox');
       default:
         throw new Error(`Unknown provider: ${providerName}`);
     }

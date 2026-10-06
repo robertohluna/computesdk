@@ -4,7 +4,9 @@
  * Full-featured provider with filesystem support using the factory pattern.
  */
 
-import { SandboxInstance, initialize } from '@blaxel/core';
+import { randomUUID } from 'node:crypto';
+
+import { SandboxInstance, Snapshot, initialize } from '@blaxel/core';
 import { defineProvider, escapeShellArg } from '@computesdk/provider';
 
 import type { CommandResult, SandboxInfo, CreateSandboxOptions, FileEntry, RunCommandOptions, CreateSnapshotOptions, ListSnapshotsOptions } from '@computesdk/provider';
@@ -40,7 +42,7 @@ export const blaxel = defineProvider<SandboxInstance, BlaxelConfig, any, any>({
 				const {
 					timeout: optTimeout,
 					envs,
-					name: _name,
+					name,
 					metadata,
 					templateId: _templateId,
 					snapshotId,
@@ -79,14 +81,32 @@ export const blaxel = defineProvider<SandboxInstance, BlaxelConfig, any, any>({
 
 				let sandbox: SandboxInstance;
 
-				// Check if we should resume an existing sandbox or create new
-				const existingId = optSandboxId || snapshotId;
-				
-				if (existingId) {
-					// Resume existing sandbox or snapshot
-					sandbox = await SandboxInstance.get(existingId);
+				if (optSandboxId) {
+					// Resume an existing live sandbox. Refuse an abort signal here:
+					// the sandbox manager destroys a resolved sandbox after an abort,
+					// which would delete a sandbox this call did not create.
+					if (options?.signal) {
+						throw new Error(
+							'create({ sandboxId }) attaches to an existing sandbox and cannot be combined with an abort signal'
+						);
+					}
+					sandbox = await SandboxInstance.get(optSandboxId);
 					if (!sandbox) {
-						throw new Error(`Sandbox ${existingId} not found`);
+						throw new Error(`Sandbox ${optSandboxId} not found`);
+					}
+				} else if (snapshotId) {
+					// Fork a new sandbox from a workspace snapshot. The fork is
+					// created even when the snapshot's source sandbox is gone.
+					const snapshot = await Snapshot.get(snapshotId);
+					const forkName = name || `sandbox-${randomUUID().slice(0, 8)}`;
+					const forkResult = await snapshot.fork(forkName, {
+						targetType: 'sandbox',
+						envs: Object.entries(envs || {}).map(([envName, value]) => ({ name: envName, value: value as string })),
+					});
+					const createdName = forkResult.name || forkName;
+					sandbox = await SandboxInstance.get(createdName);
+					if (!sandbox) {
+						throw new Error(`Sandbox ${forkName} not found after forking snapshot ${snapshotId}`);
 					}
 				} else {
 					// Create new Blaxel sandbox
@@ -197,7 +217,7 @@ export const blaxel = defineProvider<SandboxInstance, BlaxelConfig, any, any>({
 					fullCommand = `nohup ${fullCommand} > /dev/null 2>&1 &`;
 				}
 
-				const { stdout, stderr, exitCode } = await executeWithStreaming(sandbox, fullCommand);
+				const { stdout, stderr, exitCode } = await executeWithStreaming(sandbox, fullCommand, options?.timeout);
 
 				return {
 					stdout,
@@ -370,25 +390,16 @@ export const blaxel = defineProvider<SandboxInstance, BlaxelConfig, any, any>({
 		},
 
 		snapshot: {
-			create: async (config: BlaxelConfig, sandboxId: string, options?: { name?: string }) => {
+			create: async (config: BlaxelConfig, sandboxId: string, options?: CreateSnapshotOptions) => {
 				try {
 					initializeBlaxel(config);
-					
-					const sandbox = await SandboxInstance.get(sandboxId);
-					
-					if (!sandbox) {
-						throw new Error(`Sandbox ${sandboxId} not found`);
-					}
 
-					return {
-						id: sandboxId,
-						provider: 'blaxel',
-						createdAt: new Date(),
-						metadata: {
-							name: options?.name,
-							image: sandbox.spec?.runtime?.image
-						}
-					};
+					const snapshot = await Snapshot.create({
+						...(options?.name && { name: options.name }),
+						source: { name: sandboxId },
+					});
+
+					return toSnapshotInfo(snapshot);
 				} catch (error) {
 					throw new Error(
 						`Failed to create Blaxel snapshot: ${error instanceof Error ? error.message : String(error)}`
@@ -396,24 +407,31 @@ export const blaxel = defineProvider<SandboxInstance, BlaxelConfig, any, any>({
 				}
 			},
 
-			list: async (config: BlaxelConfig) => {
+			list: async (config: BlaxelConfig, options?: ListSnapshotsOptions) => {
 				initializeBlaxel(config);
-				const sandboxList = await listAllSandboxes();
-				return sandboxList.map(sandbox => ({
-					id: sandbox.metadata?.name || 'blaxel-unknown',
-					provider: 'blaxel',
-					createdAt: sandbox.metadata?.createdAt ? new Date(sandbox.metadata.createdAt) : new Date(),
-					metadata: {
-						image: sandbox.spec?.runtime?.image,
-						status: sandbox.status
-					}
-				}));
+
+				if (options?.sandboxId) {
+					const sandbox = await SandboxInstance.get(options.sandboxId);
+					const snapshots = await sandbox.snapshots.list();
+					const infos = snapshots.map(toSnapshotInfo);
+					return options.limit ? infos.slice(0, options.limit) : infos;
+				}
+
+				// Workspace-wide listing; the page is an auto-paging iterable.
+				const snapshots: Snapshot[] = [];
+				for await (const snapshot of await Snapshot.list(
+					options?.limit ? { limit: Math.min(options.limit, 200) } : undefined
+				)) {
+					snapshots.push(snapshot);
+					if (options?.limit && snapshots.length >= options.limit) break;
+				}
+				return snapshots.map(toSnapshotInfo);
 			},
 
 			delete: async (config: BlaxelConfig, snapshotId: string) => {
 				try {
 					initializeBlaxel(config);
-					await SandboxInstance.delete(snapshotId);
+					await Snapshot.delete(snapshotId);
 				} catch (error) {
 					// Ignore if not found
 				}
@@ -442,6 +460,23 @@ export const blaxel = defineProvider<SandboxInstance, BlaxelConfig, any, any>({
 		}
 	}
 });
+
+/**
+ * Map a Blaxel workspace snapshot to the provider-agnostic snapshot shape.
+ */
+function toSnapshotInfo(snapshot: Snapshot) {
+	return {
+		id: snapshot.id,
+		provider: 'blaxel',
+		createdAt: snapshot.createdAt ? new Date(snapshot.createdAt) : new Date(),
+		metadata: {
+			name: snapshot.name,
+			status: snapshot.status,
+			sourceSandbox: snapshot.source?.name,
+			sourceDeleted: snapshot.source?.deleted,
+		}
+	};
+}
 
 /**
  * Collect all sandboxes across pages — since @blaxel/core 0.3.x, list()
@@ -492,23 +527,150 @@ function convertSandboxStatus(status: string | undefined): 'running' | 'stopped'
 	}
 }
 
+/** Process statuses from which no more output will arrive. */
+const TERMINAL_PROCESS_STATUSES = new Set(['completed', 'failed', 'stopped', 'killed']);
+
+/** How long to poll for a still-running process when no command timeout is set. */
+const DEFAULT_PROCESS_WAIT_MS = 5 * 60 * 1000;
+
+/** Grace period for the live log stream to deliver its final bytes after the process goes terminal. */
+const STREAM_DRAIN_MS = 2000;
+
 /**
  * Execute a command in the sandbox and capture stdout/stderr
  */
 async function executeWithStreaming(
 	sandbox: SandboxInstance,
-	command: string
+	command: string,
+	timeoutMs?: number
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+	const stdoutLines: string[] = [];
+	const stderrLines: string[] = [];
+	// streamLogs emits whole protocol lines with their delimiters stripped,
+	// unlike the exec callbacks' arbitrary chunks — keep them separate so the
+	// framing can be restored on join.
+	const streamStdoutLines: string[] = [];
+	const streamStderrLines: string[] = [];
+
+	// Passing callbacks routes exec through @blaxel/core's execWithStreaming
+	// path, which surfaces output via stdout/stderr events, the completed-process
+	// `logs` field, and the streamed `result` event. Reading `stdout` off the
+	// plain POST /process response comes back empty on current Blaxel infra.
 	const processResult = await sandbox.process.exec({
 		command,
 		waitForCompletion: true,
+		onStdout: (line) => stdoutLines.push(line),
+		onStderr: (line) => stderrLines.push(line),
 	});
-	const result = processResult as { stdout?: string; stderr?: string; exitCode?: number };
-	return {
-		stdout: result.stdout || '',
-		stderr: result.stderr || '',
-		exitCode: result.exitCode || 0,
+
+	type ExecResult = {
+		stdout?: string;
+		stderr?: string;
+		logs?: string;
+		exitCode?: number;
+		pid?: string;
+		status?: string;
 	};
+
+	let result = processResult as ExecResult;
+
+	// On current Blaxel infra, waitForCompletion is not honored server-side:
+	// exec returns promptly with status 'running' and empty output. Poll the
+	// process to a terminal state before attempting output recovery.
+	if (result.pid && (!result.status || !TERMINAL_PROCESS_STATUSES.has(result.status))) {
+		const pid = result.pid;
+		// Mark 3 doesn't retain process output for the logs GET after the
+		// process exits — attach the live log stream before waiting so output
+		// produced while the process finishes isn't lost.
+		const logStream = sandbox.process.streamLogs(pid, {
+			onStdout: (line) => streamStdoutLines.push(line),
+			onStderr: (line) => streamStderrLines.push(line),
+			onError: () => {},
+		});
+		try {
+			const finished = (await sandbox.process.wait(pid, {
+				maxWait: timeoutMs ?? DEFAULT_PROCESS_WAIT_MS,
+				interval: 500,
+			})) as ExecResult;
+			// @blaxel/core's wait() breaks its poll loop on a mid-poll error and
+			// returns the last (possibly still 'running') response, so a resolved
+			// promise doesn't guarantee a terminal state.
+			if (!finished.status || !TERMINAL_PROCESS_STATUSES.has(finished.status)) {
+				throw new Error(
+					`Process ${pid} did not reach a terminal state (status: ${finished.status ?? 'unknown'})`
+				);
+			}
+			result = { ...result, ...finished, pid };
+		} catch (error) {
+			// Best-effort: don't leave the process running past its deadline.
+			try {
+				await sandbox.process.kill(pid);
+			} catch {
+				// Process may have already exited
+			}
+			throw error instanceof Error ? error : new Error(String(error));
+		} finally {
+			// The status poll and the log stream are separate requests — a
+			// terminal status can arrive before the stream's final bytes. Give
+			// the stream a bounded window to drain, then abort it.
+			try {
+				await Promise.race([
+					logStream.wait(),
+					new Promise((resolve) => setTimeout(resolve, STREAM_DRAIN_MS)),
+				]);
+			} catch {
+				// Fall through to abort
+			}
+			logStream.close();
+			try {
+				await logStream.wait();
+			} catch {
+				// Stream teardown is best-effort; chunks already captured stand
+			}
+		}
+	}
+
+	// Streamed callbacks receive arbitrary chunks, not lines — concatenate
+	// exactly; the result fields are authoritative when populated.
+	let stdout =
+		result.stdout ||
+		stdoutLines.join('') ||
+		streamStdoutLines.map((line) => `${line}\n`).join('');
+	let stderr =
+		result.stderr ||
+		stderrLines.join('') ||
+		streamStderrLines.map((line) => `${line}\n`).join('');
+
+	// Completed-process output may only be retrievable via the logs endpoint,
+	// which reports stdout and stderr per channel.
+	if (!stdout && result.pid) {
+		try {
+			stdout = (await sandbox.process.logs(result.pid, 'stdout')) || '';
+		} catch {
+			// Logs fetch is best-effort; keep whatever output we already have
+		}
+	}
+	if (!stderr && result.pid) {
+		try {
+			stderr = (await sandbox.process.logs(result.pid, 'stderr')) || '';
+		} catch {
+			// Logs fetch is best-effort; keep whatever output we already have
+		}
+	}
+
+	// Last resort when no per-channel output is retrievable: `logs` is the
+	// combined stream, so only treat it as stdout when stderr is empty —
+	// otherwise it would duplicate stderr content into stdout.
+	if (!stdout && !stderr && result.logs) {
+		stdout = result.logs;
+	}
+
+	let exitCode = result.exitCode ?? 0;
+	if (result.status === 'failed' && exitCode === 0) {
+		exitCode = 1;
+	}
+
+	return { stdout, stderr, exitCode };
 }
 
 // Export the Blaxel SandboxInstance type for explicit typing

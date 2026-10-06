@@ -1,0 +1,202 @@
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const { createSandbox } = vi.hoisted(() => ({ createSandbox: vi.fn() }));
+
+const files = new Map<string, string>();
+const dirs = new Set<string>();
+let openCalls = 0;
+let pwdFails = false;
+const execCalls: string[][] = [];
+
+class FakeSandbox {
+  sandboxId = 'sb-test';
+  filesystem = {
+    writeText: async (data: string, path: string) => { files.set(path, data); },
+    readText: async (path: string) => {
+      const v = files.get(path);
+      if (v === undefined) throw new Error(`SandboxFilesystemNotFoundError: ${path}`);
+      return v;
+    },
+    makeDirectory: async (path: string, options?: { createParents?: boolean }) => {
+      fsCalls.push(['makeDirectory', path, JSON.stringify(options)]);
+      dirs.add(path);
+    },
+    listFiles: async (path: string) => {
+      if (!dirs.has(path)) throw new FakeNotFoundError('missing');
+      return [
+        { name: 'a.txt', path: `${path}/a.txt`, type: 'file', size: 3, mode: 0o644, permissions: '-rw-r--r--', owner: 'root', group: 'root', modifiedTime: 1_700_000_000, symlinkTarget: null },
+        { name: 'sub dir', path: `${path}/sub dir`, type: 'directory', size: 0, mode: 0o755, permissions: 'drwxr-xr-x', owner: 'root', group: 'root', modifiedTime: 1_700_000_001, symlinkTarget: null },
+      ];
+    },
+    stat: async (path: string) => {
+      if (!files.has(path) && !dirs.has(path)) throw new FakeNotFoundError('missing');
+      return {};
+    },
+    remove: async (path: string, options?: { recursive?: boolean }) => {
+      fsCalls.push(['remove', path, JSON.stringify(options)]);
+      if (!files.delete(path) && !dirs.delete(path)) throw new FakeNotFoundError('missing');
+    },
+  };
+  async exec(command: string[]) {
+    execCalls.push(command);
+    if (command[2] === 'pwd' && pwdFails) {
+      return {
+        stdout: { readText: async () => '' },
+        stderr: { readText: async () => 'boom' },
+        wait: async () => 1,
+      };
+    }
+    const content = command[2] === 'pwd' ? '/root\n' : (files.get(command[1]) ?? '');
+    return {
+      stdout: { readText: async () => content },
+      stderr: { readText: async () => '' },
+      wait: async () => 0,
+    };
+  }
+  async open() {
+    openCalls++;
+    throw new Error('Sandbox.open is not supported for V2 sandboxes');
+  }
+}
+
+const fsCalls: string[][] = [];
+
+vi.mock('modal', () => ({
+  SandboxFilesystemNotFoundError: class extends Error {},
+  ModalClient: class {
+    apps = { fromName: async () => ({}) };
+    images = { fromRegistry: () => ({ build: async () => ({}) }) };
+    sandboxes = {
+      create: createSandbox.mockImplementation(async () => new FakeSandbox()),
+      fromId: async () => new FakeSandbox(),
+    };
+  },
+  Image: class {},
+}));
+
+import { modal } from '../index';
+import { SandboxFilesystemNotFoundError as FakeNotFoundError } from 'modal';
+
+describe('modal sandbox creation', () => {
+  beforeEach(() => { createSandbox.mockClear(); });
+
+  it('creates sandboxes through the standard SDK API without experimental options', async () => {
+    const provider = modal({ tokenId: 't', tokenSecret: 's' });
+    const sandbox = await provider.sandbox.create();
+
+    expect(sandbox.sandboxId).toBe('sb-test');
+    expect(createSandbox).toHaveBeenCalledTimes(1);
+    expect(createSandbox).toHaveBeenCalledWith({}, {}, { encryptedPorts: [38989] });
+  });
+
+  it('passes GPU and sandbox options to the SDK so it can select the backend', async () => {
+    const provider = modal({ tokenId: 't', tokenSecret: 's', timeout: 300000 });
+    await provider.sandbox.create({
+      gpu: 'T4',
+      name: 'gpu-sandbox',
+      envs: { TEST: 'value' },
+      ports: [8080],
+      timeout: 600000,
+    });
+
+    expect(createSandbox).toHaveBeenCalledTimes(1);
+    expect(createSandbox).toHaveBeenCalledWith({}, {}, {
+      gpu: 'T4',
+      encryptedPorts: [8080, 38989],
+      timeoutMs: 600000,
+      env: { TEST: 'value' },
+      name: 'gpu-sandbox',
+    });
+  });
+});
+
+describe('modal filesystem read/write', () => {
+  beforeEach(() => { files.clear(); dirs.clear(); openCalls = 0; pwdFails = false; execCalls.length = 0; fsCalls.length = 0; });
+
+  it('uses Sandbox.filesystem (V1 and V2 compatible) instead of the deprecated Sandbox.open', async () => {
+    const provider = modal({ tokenId: 't', tokenSecret: 's' });
+    const sandbox = await provider.sandbox.create();
+
+    const content = '  x'.repeat(50_000) + '\n';
+    await sandbox.filesystem.writeFile('/tmp/bench/file.txt', content);
+    expect(files.get('/tmp/bench/file.txt')).toBe(content);
+
+    // Content round-trips untouched (no trimming).
+    expect(await sandbox.filesystem.readFile('/tmp/bench/file.txt')).toBe(content);
+    expect(openCalls).toBe(0);
+  });
+
+  it('routes mkdir/readdir/exists/remove through Sandbox.filesystem', async () => {
+    const provider = modal({ tokenId: 't', tokenSecret: 's' });
+    const sandbox = await provider.sandbox.create();
+
+    await sandbox.filesystem.mkdir('/tmp/bench/fs-1');
+    expect(fsCalls).toEqual([['makeDirectory', '/tmp/bench/fs-1', '{"createParents":true}']]);
+
+    expect(await sandbox.filesystem.readdir('/tmp/bench/fs-1')).toEqual([
+      { name: 'a.txt', type: 'file', size: 3, modified: new Date(1_700_000_000_000) },
+      { name: 'sub dir', type: 'directory', size: 0, modified: new Date(1_700_000_001_000) },
+    ]);
+
+    expect(await sandbox.filesystem.exists('/tmp/bench/fs-1')).toBe(true);
+    expect(await sandbox.filesystem.exists('/nope')).toBe(false);
+
+    await sandbox.filesystem.remove('/tmp/bench/fs-1');
+    expect(fsCalls[1]).toEqual(['remove', '/tmp/bench/fs-1', '{"recursive":true}']);
+    expect(await sandbox.filesystem.exists('/tmp/bench/fs-1')).toBe(false);
+
+    // Removing a missing path is a no-op, matching `rm -rf`.
+    await expect(sandbox.filesystem.remove('/tmp/bench/fs-1')).resolves.toBeUndefined();
+    expect(execCalls).toEqual([]);
+  });
+
+  it('resolves relative filesystem paths against the exec cwd', async () => {
+    const provider = modal({ tokenId: 't', tokenSecret: 's' });
+    const sandbox = await provider.sandbox.create();
+
+    await sandbox.filesystem.writeFile('bench/file.txt', 'x');
+    expect(files.get('/root/bench/file.txt')).toBe('x');
+
+    // `.` and duplicate slashes normalize; `..` is preserved for the sandbox
+    // filesystem to resolve physically (a preceding component may be a symlink).
+    expect(await sandbox.filesystem.readFile('./bench/file.txt')).toBe('x');
+    expect(await sandbox.filesystem.exists('bench//file.txt')).toBe(true);
+    await sandbox.filesystem.writeFile('a/../b.txt', 'y');
+    expect(files.get('/root/a/../b.txt')).toBe('y');
+
+    // The workdir is probed once (`pwd`) and cached across operations.
+    expect(execCalls.filter((c) => c[2] === 'pwd')).toHaveLength(1);
+  });
+
+  it('does not cache a failed workdir probe', async () => {
+    pwdFails = true;
+    const provider = modal({ tokenId: 't', tokenSecret: 's' });
+    const sandbox = await provider.sandbox.create();
+
+    // Failed probe falls back to '/' for this op only — it is not cached.
+    await sandbox.filesystem.writeFile('x.txt', 'x');
+    expect(files.get('/x.txt')).toBe('x');
+
+    pwdFails = false;
+    await sandbox.filesystem.writeFile('y.txt', 'y');
+    expect(files.get('/root/y.txt')).toBe('y');
+    expect(execCalls.filter((c) => c[2] === 'pwd')).toHaveLength(2);
+  });
+
+  it('rejects ambiguous paths in remove', async () => {
+    const provider = modal({ tokenId: 't', tokenSecret: 's' });
+    const sandbox = await provider.sandbox.create();
+
+    for (const p of ['', '.', './', './.']) {
+      await expect(sandbox.filesystem.remove(p)).rejects.toThrow();
+    }
+    expect(fsCalls.filter((c) => c[0] === 'remove')).toHaveLength(0);
+  });
+
+  it('surfaces a descriptive error when a read fails', async () => {
+    const provider = modal({ tokenId: 't', tokenSecret: 's' });
+    const sandbox = await provider.sandbox.create();
+
+    await expect(sandbox.filesystem.readFile('/missing.txt')).rejects.toThrow(/Failed to read file \/missing\.txt/);
+  });
+});
