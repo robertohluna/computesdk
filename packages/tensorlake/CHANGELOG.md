@@ -1,5 +1,36 @@
 # @computesdk/tensorlake
 
+## 0.1.14
+
+### Patch Changes
+
+- 1f0a8f4: Resolve relative `filesystem.*` paths to an absolute workdir before calling the provider's filesystem API (which requires absolute paths). Relative paths now resolve against the sandbox's exec cwd — falling back to `$HOME` on Tensorlake when the cwd isn't writable — matching what `runCommand` execs see. `.` and duplicate slashes normalize; `..` is preserved for physical resolution.
+
+## 0.1.13
+
+### Patch Changes
+
+- Updated dependencies [7e65fe7]
+  - @computesdk/provider@2.1.8
+  - computesdk@4.1.7
+
+## 0.1.12
+
+### Patch Changes
+
+- Updated dependencies [0732fed]
+  - computesdk@4.1.6
+  - @computesdk/provider@2.1.7
+
+## 0.1.11
+
+### Patch Changes
+
+- 3914faa: Fix disk sizing on sandbox create: `ephemeralDiskMb` was passed under a name the Tensorlake SDK's `Sandbox.create` ignores — it now maps to `diskMb`, so the requested disk size is honored. `SandboxResourceOptions` gains a typed `diskMb` field (Tensorlake), and the adapter accepts `diskMb` directly with `ephemeralDiskMb` kept as an alias.
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - @computesdk/provider@2.1.6
+
 ## 0.1.10
 
 ### Patch Changes

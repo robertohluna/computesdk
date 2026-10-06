@@ -1,5 +1,30 @@
 # @computesdk/provider
 
+## 2.1.8
+
+### Patch Changes
+
+- 7e65fe7: fix(daemond): bootstrap node into sandboxes that lack a JS runtime. `daemonSeedScriptCommand` now resolves node from PATH, a cached bootstrap under `~/.computesdk/daemond`, or a pinned static build fetched through whatever the image ships (curl, wget, busybox wget, python3), and exits 127 with a clear `daemond:` capability error when none of that works. `parseSeedInvocationOutput` and the factory's daemon path now include the raw output tail / stderr so failures are diagnosable from job logs.
+- Updated dependencies [7e65fe7]
+  - daemond@0.1.5
+  - computesdk@4.1.7
+
+## 2.1.7
+
+### Patch Changes
+
+- Updated dependencies [0732fed]
+  - computesdk@4.1.6
+  - daemond@0.1.4
+
+## 2.1.6
+
+### Patch Changes
+
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - daemond@0.1.4
+
 ## 2.1.5
 
 ### Patch Changes

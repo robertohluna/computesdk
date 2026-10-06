@@ -22,13 +22,16 @@ ComputeSDK is built around provider packages. Each provider ships as its own pac
 
 When you install a package like `@computesdk/e2b`, you get a factory function for that provider. Every provider returns the same sandbox interface, so you can swap infrastructure without rewriting core logic.
 
-## Supported cloud sandbox providers
+## Supported sandbox providers
+
+Providers are platforms that provide sandboxes. Each package under `@computesdk/{provider}` exposes the same sandbox interface, so you can swap infrastructure without rewriting application code.
 
 | Package                        | Provider     |
 | ------------------------------ | ------------ |
 | `@computesdk/archil`           | Archil       |
 | `@computesdk/beam`             | Beam         |
 | `@computesdk/blaxel`           | Blaxel       |
+| `@computesdk/buddy`            | Buddy        |
 | `@computesdk/cloud-run`        | Cloud Run    |
 | `@computesdk/cloudflare`       | Cloudflare   |
 | `@computesdk/codesandbox`      | CodeSandbox  |

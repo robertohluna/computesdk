@@ -1,5 +1,41 @@
 # @computesdk/vercel
 
+## 1.7.37
+
+### Patch Changes
+
+- Updated dependencies [7e65fe7]
+  - @computesdk/provider@2.1.8
+  - computesdk@4.1.7
+
+## 1.7.36
+
+### Patch Changes
+
+- 64a51b1: Route mkdir/readdir/exists/remove through `sandbox.fs`. `mkdir` now creates parent directories (the raw `Sandbox.mkDir` API is non-recursive and failed with "error creating directory: No such file or directory" for nested paths), and `readdir`/`exists`/`remove` are implemented instead of throwing "not supported".
+
+## 1.7.35
+
+### Patch Changes
+
+- Updated dependencies [0732fed]
+  - computesdk@4.1.6
+  - @computesdk/provider@2.1.7
+
+## 1.7.34
+
+### Patch Changes
+
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - @computesdk/provider@2.1.6
+
+## 1.7.33
+
+### Patch Changes
+
+- e8709ce: Bump `@vercel/sandbox` to `^3.0.0` and migrate `Sandbox.get` calls and sandbox identifiers to the `name` property introduced in v3.
+
 ## 1.7.32
 
 ### Patch Changes

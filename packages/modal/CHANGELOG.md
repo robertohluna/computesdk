@@ -1,5 +1,47 @@
 # @computesdk/modal
 
+## 1.9.11
+
+### Patch Changes
+
+- ea5be06: Harden the relative `filesystem.*` path resolution: `remove(''|'.'|'./')` no longer collapses to the sandbox workdir (it is rejected before resolution instead of recursively deleting it), and a failed `pwd` workdir probe is evicted instead of being cached as `/` forever — the next filesystem operation probes again.
+
+## 1.9.10
+
+### Patch Changes
+
+- Updated dependencies [7e65fe7]
+  - @computesdk/provider@2.1.8
+  - computesdk@4.1.7
+
+## 1.9.9
+
+### Patch Changes
+
+- a5b4353: Accept relative paths in `sandbox.filesystem` operations. Providers whose native file APIs require absolute paths (Modal `filesystem.*`, createos `files.*`, Sail `fs.*`) previously rejected or misrouted relative paths; they are now resolved against the sandbox's exec working directory — probed once via `pwd` and cached — so `filesystem.writeFile('a.txt', ...)` and `runCommand('cat a.txt')` address the same file. Absolute paths skip the probe entirely; `.` segments and duplicate slashes are normalized, while `..` segments are left for the sandbox filesystem to resolve physically.
+
+## 1.9.8
+
+### Patch Changes
+
+- Updated dependencies [0732fed]
+  - computesdk@4.1.6
+  - @computesdk/provider@2.1.7
+
+## 1.9.7
+
+### Patch Changes
+
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - @computesdk/provider@2.1.6
+
+## 1.9.6
+
+### Patch Changes
+
+- 1f0acfe: Route filesystem operations through Modal's Sandbox.filesystem API (readText/writeText/makeDirectory/listFiles/stat/remove) so they work on V2 (scalable) sandboxes, where the deprecated Sandbox.open and shell-backed fallbacks are unreliable.
+
 ## 1.9.5
 
 ### Patch Changes

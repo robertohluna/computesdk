@@ -53,15 +53,14 @@ jobs:
         id: changesets
         uses: changesets/action@v1
         with:
-          # --provenance generates signed attestations linking each package
-          # to this workflow run. Automatically enabled when using trusted
-          # publishers, but explicit here for clarity.
+          # Publishing uses npm Trusted Publisher OIDC where configured.
+          # Packages without a trusted publisher on npmjs.com fall back to the
+          # long-lived NPM_TOKEN. --provenance signs the attestation.
+          # TODO: once every package has a trusted publisher configured, remove
+          # NPM_TOKEN entirely.
           publish: pnpm changeset publish --provenance
           title: "Version Packages"
           commit: "Version Packages"
         env:
           GITHUB_TOKEN: ${{ secrets.CHANGESET_TOKEN || secrets.GITHUB_TOKEN }}
-          # TODO: once every package has a trusted publisher configured on
-          # npmjs.com, remove NPM_TOKEN entirely. For now it acts as a
-          # fallback for packages not yet configured.
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}

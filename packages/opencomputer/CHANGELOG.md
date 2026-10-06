@@ -1,5 +1,42 @@
 # @computesdk/opencomputer
 
+## 1.0.7
+
+### Patch Changes
+
+- Updated dependencies [7e65fe7]
+  - @computesdk/provider@2.1.8
+  - computesdk@4.1.7
+
+## 1.0.6
+
+### Patch Changes
+
+- Updated dependencies [0732fed]
+  - computesdk@4.1.6
+  - @computesdk/provider@2.1.7
+
+## 1.0.5
+
+### Patch Changes
+
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - @computesdk/provider@2.1.6
+
+## 1.0.4
+
+### Patch Changes
+
+- c93cc2d: Start the `@opencomputer/sdk` import at module load instead of at first use.
+
+  The SDK initialises at import. `loadSandbox()` is first reached from
+  `sandbox.create()`, so deferring the import there meant that initialisation
+  happened during the first create rather than before it.
+
+  The import stays dynamic: the SDK is ESM-only with top-level await, so a static
+  import compiles to `require()` in this package's CJS build and fails to load.
+
 ## 1.0.3
 
 ### Patch Changes

@@ -1,5 +1,43 @@
 # @computesdk/runloop
 
+## 1.3.60
+
+### Patch Changes
+
+- Updated dependencies [7e65fe7]
+  - @computesdk/provider@2.1.8
+  - computesdk@4.1.7
+
+## 1.3.59
+
+### Patch Changes
+
+- Updated dependencies [0732fed]
+  - computesdk@4.1.6
+  - @computesdk/provider@2.1.7
+
+## 1.3.58
+
+### Patch Changes
+
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - @computesdk/provider@2.1.6
+
+## 1.3.57
+
+### Patch Changes
+
+- 43b9fa6: chore(runloop): update client to 1.30.0
+
+  Bump `@runloop/api-client` to `^1.30.0` to pick up improvements to the `create_and_await_running` API that reduce latency.
+
+## 1.3.56
+
+### Patch Changes
+
+- 9956e9e: Modernize Runloop command execution, streaming, filesystem operations, lifecycle handling, pagination, errors, and snapshots using `@runloop/api-client` 1.28.
+
 ## 1.3.55
 
 ### Patch Changes

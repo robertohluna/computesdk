@@ -1,5 +1,61 @@
 # @computesdk/namespace
 
+## 1.6.20
+
+### Patch Changes
+
+- 6096b4d: fix(namespace): report destroyed instances as gone
+
+  DescribeInstance keeps returning an instance while it is DESTROYING or
+  DESTROYED — NotFound only comes later — so getById (and list) saw deleted
+  sandboxes as alive forever. getById now maps InstanceMetadata.status
+  DESTROYING/DESTROYED (name or number encoding) to null, list filters them,
+  NamespaceSandbox carries the lowercased status into getInfo, and destroy
+  rejects on API failure instead of warning-and-succeeding.
+
+- e110bfa: fix(namespace): refresh instance status in getInfo
+
+  getInfo returned the status snapshot captured when the handle was
+  attached, so a long-held handle kept reporting running after the
+  instance was suspended, errored, or destroyed. getInfo now describes
+  the instance live: terminal and suspended states map to stopped, a
+  describe 404 maps to stopped (NotFound only arrives once the terminal
+  statuses have passed), and the refreshed state is written back onto the
+  handle. Unrecognized or future statuses fall back to running instead of
+  reading as stopped.
+
+## 1.6.19
+
+### Patch Changes
+
+- Updated dependencies [7e65fe7]
+  - @computesdk/provider@2.1.8
+  - computesdk@4.1.7
+
+## 1.6.18
+
+### Patch Changes
+
+- deca747: feat(namespace): support `dockerSockPath` create option to mount the instance's managed dockerd socket
+
+  Setting `dockerSockPath` (e.g. `/var/run/docker.sock`) on `sandbox.create` sets `docker_sock_path` on the container, so containers can drive the instance's managed Docker daemon without needing elevated privileges to run dockerd inside the container.
+
+## 1.6.17
+
+### Patch Changes
+
+- Updated dependencies [0732fed]
+  - computesdk@4.1.6
+  - @computesdk/provider@2.1.7
+
+## 1.6.16
+
+### Patch Changes
+
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - @computesdk/provider@2.1.6
+
 ## 1.6.15
 
 ### Patch Changes

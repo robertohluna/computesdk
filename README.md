@@ -80,6 +80,7 @@ Install provider packages and pass instances into `compute.setConfig`:
 | **Arker** | `ARKER_API_KEY` | Sandboxed VMs with persistent filesystems, forked from golden images |
 | **Beam** | `BEAM_TOKEN`, `BEAM_WORKSPACE_ID` | Serverless cloud sandboxes |
 | **Blaxel** | `BL_API_KEY`, `BL_WORKSPACE` | Agent sandboxes with custom images |
+| **Brezel** | `BREZEL_API_KEY`, `BREZEL_API_URL`, `BREZEL_PROJECT_ID`, `BREZEL_ENVIRONMENT_REVISION` | Self-hosted Firecracker sandboxes |
 | **Cloud Run** | `CLOUD_RUN_SANDBOX_URL`, `CLOUD_RUN_SANDBOX_SECRET` | Google Cloud Run sandboxes |
 | **Cloudflare** | `CLOUDFLARE_SANDBOX_URL`, `CLOUDFLARE_SANDBOX_API_KEY` | Edge computing |
 | **CodeSandbox** | `CSB_API_KEY` | Collaborative development |
@@ -87,13 +88,17 @@ Install provider packages and pass instances into `compute.setConfig`:
 | **Daytona** | `DAYTONA_API_KEY` | Development workspaces |
 | **Declaw** | `DECLAW_API_KEY` | Isolated cloud sandboxes |
 | **E2B** | `E2B_API_KEY` | Data science, Python/Node.js, interactive terminals |
+| **Freestyle** | `FREESTYLE_API_KEY` | Full Linux VMs for long-running agent tasks, with snapshots and persistence |
 | **HopX** | `HOPX_API_KEY` | Fast ephemeral sandboxes |
 | **Isorun** | `ISORUN_API_KEY` | Code execution with snapshot support |
 | **Lightning** | `LIGHTNING_API_KEY` | Cloud sandboxes for command execution and filesystem access |
 | **Modal** | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | GPU computing, ML inference |
+| **Microsandbox** | `MSB_API_KEY` or `MSB_PROFILE` for cloud; none for explicit local mode | Hardware-isolated microVMs on local machines or microsandbox cloud |
+| **MIOSA** | `MIOSA_API_KEY` | Snapshot-backed Firecracker microVM sandboxes with native filesystem and preview URLs |
 | **Mosaic** | `MOSAIC_API_URL`, `MOSAIC_API_TOKEN` | Firecracker microVMs with preview URLs, snapshots, and container-image environments |
 | **NeevCloud** | `NEEV_API_KEY`, `NEEV_ORG_ID`, `NEEV_PROJECT_ID` | Cloud sandboxes with command execution and preview URLs |
 | **Northflank** | `NORTHFLANK_TOKEN`, `NORTHFLANK_PROJECT_ID` | Cloud sandboxes with preview URLs |
+| **Novita** | `NOVITA_API_KEY` | Cloud sandboxes with native command streaming, filesystem access, snapshots, and template builds |
 | **OpenComputer** | `OPENCOMPUTER_API_KEY` | Persistent cloud VMs with checkpoints and preview URLs |
 | **Run Cloud** | `RUN_CLOUD_API_KEY` | Fast Firecracker microVM sandboxes with snapshots |
 | **Runloop** | `RUNLOOP_API_KEY` | Code execution, automation |
@@ -289,6 +294,8 @@ Install the provider packages you need and pass their instances into `compute.se
 npm install @computesdk/archil           # Archil provider
 npm install @computesdk/beam             # Beam provider
 npm install @computesdk/blaxel           # Blaxel provider
+npm install @computesdk/brezel           # Brezel provider
+npm install @computesdk/buddy            # Buddy provider
 npm install @computesdk/cloud-run        # Google Cloud Run provider
 npm install @computesdk/cloudflare       # Cloudflare provider
 npm install @computesdk/codesandbox      # CodeSandbox provider
@@ -296,12 +303,17 @@ npm install @computesdk/createos-sandbox # CreateOS VM sandbox provider
 npm install @computesdk/daytona          # Daytona provider
 npm install @computesdk/declaw           # Declaw provider
 npm install @computesdk/e2b              # E2B provider
+npm install @computesdk/freestyle        # Freestyle provider
+npm install @computesdk/givemeanode      # givemeanode provider
 npm install @computesdk/hopx             # HopX provider
 npm install @computesdk/isorun           # Isorun provider
 npm install @computesdk/lightning        # Lightning AI provider
 npm install @computesdk/modal            # Modal provider
+npm install @computesdk/microsandbox     # Local and cloud microsandbox provider
+npm install @computesdk/miosa            # MIOSA provider
 npm install @computesdk/mosaic           # Mosaic provider
 npm install @computesdk/northflank       # Northflank provider
+npm install @computesdk/novita           # Novita Sandbox provider
 npm install @computesdk/run-cloud        # Run Cloud Firecracker sandbox provider
 npm install @computesdk/runloop          # Runloop provider
 npm install @computesdk/sail             # Sail provider
@@ -325,6 +337,8 @@ See individual provider READMEs for details:
 - **[@computesdk/archil](./packages/archil)** - Disk-attached command-execution sandboxes
 - **[@computesdk/beam](./packages/beam)** - Serverless cloud sandboxes
 - **[@computesdk/blaxel](./packages/blaxel)** - Agent sandboxes with custom images
+- **[@computesdk/brezel](./packages/brezel)** - Self-hosted Firecracker sandboxes with immutable environments
+- **[@computesdk/buddy](./packages/buddy)** - Persistent Ubuntu sandboxes for agents, booting in milliseconds, with preview URLs and snapshots
 - **[@computesdk/cloud-run](./packages/cloud-run)** - Google Cloud Run sandboxes
 - **[@computesdk/cloudflare](./packages/cloudflare)** - Edge computing sandboxes
 - **[@computesdk/codesandbox](./packages/codesandbox)** - Collaborative development
@@ -332,12 +346,16 @@ See individual provider READMEs for details:
 - **[@computesdk/daytona](./packages/daytona)** - Development workspaces
 - **[@computesdk/declaw](./packages/declaw)** - Isolated cloud sandboxes
 - **[@computesdk/e2b](./packages/e2b)** - Data science, Python/Node.js, terminals
+- **[@computesdk/freestyle](./packages/freestyle)** - Full Linux VMs for long-running agent tasks, with snapshots and persistence
+- **[@computesdk/givemeanode](./packages/givemeanode)** - Very fast microVM sandboxes, from any container image
 - **[@computesdk/hopx](./packages/hopx)** - Fast ephemeral sandboxes
 - **[@computesdk/isorun](./packages/isorun)** - Code execution with snapshot support
 - **[@computesdk/lightning](./packages/lightning)** - Lightning AI cloud sandboxes for command execution and filesystem access
 - **[@computesdk/modal](./packages/modal)** - GPU computing, ML inference
+- **[@computesdk/miosa](./packages/miosa)** - Snapshot-backed Firecracker microVMs with native filesystem, preview URLs, and checkpoints
 - **[@computesdk/mosaic](./packages/mosaic)** - Firecracker microVMs with preview URLs, snapshots, and container-image environments
 - **[@computesdk/neevcloud](./packages/neevcloud)** - Secure cloud sandboxes with command execution, filesystem, and preview URLs
+- **[@computesdk/novita](./packages/novita)** - Novita cloud sandboxes with native streaming, filesystem access, snapshots, and template management
 - **[@computesdk/northflank](./packages/northflank)** - Cloud sandboxes with preview URLs
 - **[@computesdk/run-cloud](./packages/run-cloud)** - Fast Firecracker microVM sandboxes with filesystem and snapshot support
 - **[@computesdk/runloop](./packages/runloop)** - Code execution, automation

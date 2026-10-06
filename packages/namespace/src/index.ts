@@ -19,6 +19,42 @@ export interface NamespaceSandbox {
   token: string;
   targetContainerName: string;
   createdAt: Date;
+  /** Instance lifecycle state from InstanceMetadata.status, lowercased (e.g. 'running', 'destroying'). */
+  status?: string;
+}
+
+/**
+ * Proto enum values of InstanceMetadata.Status that mean the instance is gone
+ * or going away. JSON transcoding emits the enum either as its name
+ * ('DESTROYED') or its number (4 = DESTROYED, 5 = DESTROYING).
+ */
+const GONE_INSTANCE_STATUSES = new Set<string | number>(['DESTROYED', 'DESTROYING', 4, 5]);
+
+/** InstanceMetadata.Status names by proto number, for numeric encodings. */
+const INSTANCE_STATUS_NAMES: Record<number, string> = {
+  1: 'pending',
+  2: 'creating',
+  3: 'running',
+  4: 'destroyed',
+  5: 'destroying',
+  6: 'suspending',
+  7: 'suspended',
+  8: 'error',
+};
+
+function instanceStatus(
+  metadata: { status?: string | number } | undefined,
+): string | undefined {
+  const status = metadata?.status;
+  if (typeof status === 'string') return status.toLowerCase();
+  if (typeof status === 'number') return INSTANCE_STATUS_NAMES[status] ?? 'unknown';
+  return undefined;
+}
+
+function isGoneInstance(
+  metadata: { status?: string | number } | undefined,
+): boolean {
+  return metadata?.status !== undefined && GONE_INSTANCE_STATUSES.has(metadata.status);
 }
 
 /**
@@ -151,7 +187,15 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
               args: ['sleep', 'infinity'],
               ...(options?.envs && Object.keys(options.envs).length > 0 && {
                 environment: options.envs
-              })
+              }),
+              // Mounts the instance's managed dockerd socket (e.g.
+              // '/var/run/docker.sock') so the container can drive Docker —
+              // the daemon runs on the micro-VM, not inside the container,
+              // which needs no elevated container privileges.
+              ...(typeof options?.dockerSockPath === 'string' &&
+                options.dockerSockPath !== '' && {
+                  docker_sock_path: options.dockerSockPath
+                })
             }],
             documented_purpose: config.documentedPurpose || 'ComputeSDK sandbox',
             deadline: new Date(Date.now() + 60 * 60 * 1000).toISOString()
@@ -199,6 +243,11 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
             throw new Error('Instance data is missing from Namespace response');
           }
 
+          // A destroyed instance stays describable (its status moves to
+          // DESTROYING/DESTROYED, NotFound only comes later) — absent the
+          // status check, callers confirming a deletion see it alive forever.
+          if (isGoneInstance(responseData.metadata)) return null;
+
           const instanceId = responseData.metadata.instanceId;
           const sandbox: NamespaceSandbox = {
             instanceId,
@@ -207,6 +256,7 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
             token,
             targetContainerName: config.targetContainerName || 'main-container',
             createdAt: responseData.metadata?.createdAt ? new Date(responseData.metadata.createdAt) : new Date(0),
+            status: instanceStatus(responseData.metadata),
           };
 
           return { sandbox, sandboxId: instanceId };
@@ -230,7 +280,11 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
           const instances = responseData?.instances || [];
 
           return instances
-            .filter((instanceData: any) => instanceData.instanceId || instanceData.metadata?.instanceId)
+            .filter(
+              (instanceData: any) =>
+                (instanceData.instanceId || instanceData.metadata?.instanceId) &&
+                !isGoneInstance(instanceData.metadata),
+            )
             .map((instanceData: any) => {
               const instanceId = instanceData.instanceId || instanceData.metadata.instanceId;
               const sandbox: NamespaceSandbox = {
@@ -240,6 +294,7 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
                 token,
                 targetContainerName: config.targetContainerName || 'main-container',
                 createdAt: instanceData.metadata?.createdAt ? new Date(instanceData.metadata.createdAt) : new Date(0),
+                status: instanceStatus(instanceData.metadata),
               };
               return { sandbox, sandboxId: instanceId };
             });
@@ -254,19 +309,17 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
         const { token } = await getAndValidateCredentials(config);
 
         try {
-          const data = await fetchNamespace(token, API_ENDPOINTS.DESTROY_INSTANCE, {
+          await fetchNamespace(token, API_ENDPOINTS.DESTROY_INSTANCE, {
             method: 'POST',
             body: JSON.stringify({
               instance_id: sandboxId,
               reason: config.destroyReason || "ComputeSDK cleanup"
             })
           });
-
-          if (data.error) {
-            console.warn(`Namespace destroy warning: ${data.error}`);
-          }
         } catch (error) {
-          console.warn(`Namespace destroy warning: ${error instanceof Error ? error.message : String(error)}`);
+          throw new Error(
+            `Failed to destroy Namespace instance: ${error instanceof Error ? error.message : String(error)}`
+          );
         }
       },
 
@@ -334,10 +387,38 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
       },
 
       getInfo: async (sandbox: NamespaceSandbox): Promise<SandboxInfo> => {
+        // The handle's status is a snapshot; describe the instance live so a
+        // long-held handle sees suspensions and destruction as they happen.
+        try {
+          const responseData = await fetchNamespace(sandbox.token, API_ENDPOINTS.DESCRIBE_INSTANCE, {
+            method: 'POST',
+            body: JSON.stringify({ instance_id: sandbox.instanceId })
+          });
+          sandbox.status = instanceStatus(responseData.metadata);
+        } catch (error) {
+          if (error instanceof Error && error.message.includes('404')) {
+            // DescribeInstance only reaches NotFound once the terminal
+            // statuses have passed — the instance is gone either way.
+            sandbox.status = 'destroyed';
+          } else {
+            throw new Error(
+              `Failed to get Namespace instance info: ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+        }
+
         return {
           id: sandbox.instanceId,
           provider: 'namespace',
-          status: 'running',
+          status:
+            sandbox.status === 'error'
+              ? 'error'
+              : sandbox.status === 'destroyed' ||
+                  sandbox.status === 'destroying' ||
+                  sandbox.status === 'suspended' ||
+                  sandbox.status === 'suspending'
+                ? 'stopped'
+                : 'running',
           createdAt: sandbox.createdAt,
           timeout: 0,
           metadata: {

@@ -1,5 +1,120 @@
 # @computesdk/example-basic
 
+## 0.4.104
+
+### Patch Changes
+
+- Updated dependencies [ea5be06]
+- Updated dependencies [1f0a8f4]
+  - @computesdk/modal@1.9.11
+  - @computesdk/superserve@0.2.6
+
+## 0.4.103
+
+### Patch Changes
+
+- computesdk@4.1.7
+- @computesdk/blaxel@1.6.24
+- @computesdk/codesandbox@1.5.55
+- @computesdk/daytona@1.7.36
+- @computesdk/docker@1.2.54
+- @computesdk/e2b@1.7.56
+- @computesdk/modal@1.9.10
+- @computesdk/runloop@1.3.60
+- @computesdk/superserve@0.2.5
+- @computesdk/vercel@1.7.37
+
+## 0.4.102
+
+### Patch Changes
+
+- Updated dependencies [7415b62]
+  - @computesdk/blaxel@1.6.23
+
+## 0.4.101
+
+### Patch Changes
+
+- Updated dependencies [a5b4353]
+- Updated dependencies [64a51b1]
+  - @computesdk/modal@1.9.9
+  - @computesdk/vercel@1.7.36
+  - @computesdk/blaxel@1.6.22
+  - @computesdk/codesandbox@1.5.54
+  - @computesdk/daytona@1.7.35
+  - @computesdk/docker@1.2.53
+  - @computesdk/e2b@1.7.55
+  - @computesdk/runloop@1.3.59
+  - @computesdk/superserve@0.2.4
+
+## 0.4.100
+
+### Patch Changes
+
+- Updated dependencies [febe062]
+  - @computesdk/blaxel@1.6.22
+
+## 0.4.99
+
+### Patch Changes
+
+- Updated dependencies [0732fed]
+- Updated dependencies [a1406e4]
+  - computesdk@4.1.6
+  - @computesdk/blaxel@1.6.21
+  - @computesdk/codesandbox@1.5.54
+  - @computesdk/daytona@1.7.35
+  - @computesdk/docker@1.2.53
+  - @computesdk/e2b@1.7.55
+  - @computesdk/modal@1.9.8
+  - @computesdk/runloop@1.3.59
+  - @computesdk/superserve@0.2.4
+  - @computesdk/vercel@1.7.35
+
+## 0.4.98
+
+### Patch Changes
+
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - @computesdk/blaxel@1.6.20
+  - @computesdk/codesandbox@1.5.53
+  - @computesdk/daytona@1.7.34
+  - @computesdk/docker@1.2.52
+  - @computesdk/e2b@1.7.54
+  - @computesdk/modal@1.9.7
+  - @computesdk/runloop@1.3.58
+  - @computesdk/superserve@0.2.3
+  - @computesdk/vercel@1.7.34
+
+## 0.4.97
+
+### Patch Changes
+
+- Updated dependencies [1f0acfe]
+  - @computesdk/modal@1.9.6
+
+## 0.4.96
+
+### Patch Changes
+
+- Updated dependencies [43b9fa6]
+  - @computesdk/runloop@1.3.57
+
+## 0.4.95
+
+### Patch Changes
+
+- Updated dependencies [e8709ce]
+  - @computesdk/vercel@1.7.33
+
+## 0.4.94
+
+### Patch Changes
+
+- Updated dependencies [9956e9e]
+  - @computesdk/runloop@1.3.56
+
 ## 0.4.93
 
 ### Patch Changes
