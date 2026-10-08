@@ -13,6 +13,8 @@ interface SeedLauncherDaemonConfig {
   sseHost: string;
   ssePort: number;
   sseStrictPort?: boolean;
+  maxJobOutputBytes?: number;
+  jobRetentionMs?: number;
 }
 
 interface WireMessage {
@@ -52,6 +54,19 @@ function loadConfig(): SeedLauncherDaemonConfig {
 }
 
 const config = loadConfig();
+
+const DEFAULT_MAX_JOB_OUTPUT_BYTES = 4 * 1024 * 1024;
+const DEFAULT_JOB_RETENTION_MS = 10 * 60 * 1000;
+
+const maxJobOutputBytes =
+  Number.isFinite(config.maxJobOutputBytes) && Number(config.maxJobOutputBytes) > 0
+    ? Number(config.maxJobOutputBytes)
+    : DEFAULT_MAX_JOB_OUTPUT_BYTES;
+const jobRetentionMs =
+  Number.isFinite(config.jobRetentionMs) && Number(config.jobRetentionMs) > 0
+    ? Number(config.jobRetentionMs)
+    : DEFAULT_JOB_RETENTION_MS;
+
 const startedAt = now();
 const subscribers = new Set<Subscriber>();
 const sseClients = new Set<http.ServerResponse>();
@@ -117,37 +132,96 @@ function sanitizeEnvInput(input: unknown): Record<string, string> {
   return env;
 }
 
-function handleExec(msg: WireMessage, conn: net.Socket): void {
+interface Job {
+  id: string;
+  requestId: string;
+  pid: number | null;
+  status: "running" | "exited";
+  exitCode: number | null;
+  signal: string | null;
+  stdout: string;
+  stderr: string;
+  combined: string;
+  stdin: import("node:stream").Writable | null;
+  stdinOpen: boolean;
+  bounded: boolean;
+  truncated: boolean;
+  /** Total bytes ever appended to each stream, before truncation. */
+  stdoutBytes: number;
+  stderrBytes: number;
+  kill(signal: string): void;
+  onExit: Set<() => void>;
+}
+
+const jobs = new Map<string, Job>();
+
+function jobSnapshot(job: Job): Record<string, unknown> {
+  return {
+    jobId: job.id,
+    pid: job.pid,
+    status: job.status,
+    exitCode: job.exitCode,
+    signal: job.signal,
+    stdout: job.stdout,
+    stderr: job.stderr,
+    combined: job.combined,
+    truncated: job.truncated,
+    stdoutBytes: job.stdoutBytes,
+    stderrBytes: job.stderrBytes,
+  };
+}
+
+function reply(conn: net.Socket, type: string, replyTo: string, payload: Record<string, unknown>): void {
+  writeLine(conn, { id: makeId(), type, replyTo, ts: now(), payload });
+}
+
+function replyError(conn: net.Socket, replyTo: string, message: string): void {
+  reply(conn, "error", replyTo, { message });
+}
+
+function appendOutput(job: Job, field: "stdout" | "stderr" | "combined", text: string): void {
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (field === "stdout") job.stdoutBytes += bytes;
+  else if (field === "stderr") job.stderrBytes += bytes;
+  let next = job[field] + text;
+  // Detached jobs buffer output for later status/wait reads, so the buffers
+  // are bounded — keep the tail once a stream outgrows the cap. Attached
+  // execs are replied to on exit and never stored, so they stay unbounded.
+  if (job.bounded && Buffer.byteLength(next, "utf8") > maxJobOutputBytes) {
+    const buf = Buffer.from(next, "utf8");
+    next = buf.subarray(buf.length - maxJobOutputBytes).toString("utf8");
+    job.truncated = true;
+  }
+  job[field] = next;
+}
+
+function startJob(msg: WireMessage): Job | string {
   const payload = msg.payload ?? {};
   const requestId = msg.id || makeId();
   const command = String(payload.command ?? "").trim();
   const args = Array.isArray(payload.args) ? payload.args.map((value) => String(value)) : [];
   const cwd = typeof payload.cwd === "string" && payload.cwd.length > 0 ? payload.cwd : process.cwd();
   const shell = payload.shell === true;
-  const timeoutMs = Number.isFinite(payload.timeoutMs) ? Math.max(1, Number(payload.timeoutMs)) : 60_000;
+  const detach = payload.detach === true;
+  // An attached exec has always defaulted to a 60s deadline; a detached job is
+  // by definition something the caller expects to outlive the request.
+  const timeoutMs = Number.isFinite(payload.timeoutMs)
+    ? Math.max(1, Number(payload.timeoutMs))
+    : detach
+      ? null
+      : 60_000;
   const extraEnv = sanitizeEnvInput(payload.env);
+  const useStdin = payload.stdin === true;
 
-  if (!command) {
-    writeLine(conn, {
-      id: makeId(),
-      type: "exec_result",
-      replyTo: requestId,
-      ts: now(),
-      payload: {
-        exitCode: 1,
-        signal: null,
-        stdout: "",
-        stderr: "seed daemon: command is required",
-        combined: "seed daemon: command is required\n",
-      },
-    });
-    return;
-  }
+  if (!command) return "seed daemon: command is required";
+
+  const jobId = makeId();
 
   publish({
     channel: "daemon",
     type: "command.started",
     requestId,
+    jobId,
     command,
     args,
     ts: now(),
@@ -160,90 +234,292 @@ function handleExec(msg: WireMessage, conn: net.Socket): void {
       ...process.env,
       ...extraEnv,
     },
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: useStdin ? ["pipe", "pipe", "pipe"] : ["ignore", "pipe", "pipe"],
+    // Own process group, so a kill reaches the whole tree: a `sh -c` wrapper
+    // dying alone would leave its children holding the output pipes open and
+    // the job "running" until they exit on their own.
+    detached: true,
   });
 
-  let stdout = "";
-  let stderr = "";
-  let combined = "";
+  const job: Job = {
+    id: jobId,
+    requestId,
+    pid: child.pid ?? null,
+    status: "running",
+    exitCode: null,
+    signal: null,
+    stdout: "",
+    stderr: "",
+    combined: "",
+    stdin: useStdin ? child.stdin : null,
+    stdinOpen: useStdin,
+    bounded: detach,
+    truncated: false,
+    stdoutBytes: 0,
+    stderrBytes: 0,
+    kill(signal: string) {
+      try {
+        if (child.pid) process.kill(-child.pid, signal as NodeJS.Signals);
+        else child.kill(signal as NodeJS.Signals);
+      } catch {
+        try {
+          child.kill(signal as NodeJS.Signals);
+        } catch {}
+      }
+    },
+    onExit: new Set(),
+  };
+  jobs.set(job.id, job);
+
+  if (job.stdin) {
+    let stdinClosePublished = false;
+    const onStdinClosed = (): void => {
+      if (stdinClosePublished) return;
+      stdinClosePublished = true;
+      job.stdinOpen = false;
+      publish({
+        channel: "daemon",
+        type: "command.stdin.closed",
+        requestId,
+        jobId: job.id,
+        ts: now(),
+      });
+    };
+    job.stdin.once("close", onStdinClosed);
+    job.stdin.once("finish", onStdinClosed);
+    // A stream error (EPIPE, write-after-end) must never surface as an
+    // unhandled 'error' event and take the daemon down.
+    job.stdin.on("error", () => {
+      job.stdinOpen = false;
+    });
+  }
+
   let finished = false;
   let timedOut = false;
   let killTimer: NodeJS.Timeout | null = null;
 
-  const timer = setTimeout(() => {
-    timedOut = true;
-    try {
-      child.kill("SIGTERM");
-    } catch {}
+  const timer =
+    timeoutMs === null
+      ? null
+      : setTimeout(() => {
+          timedOut = true;
+          job.kill("SIGTERM");
+          killTimer = setTimeout(() => job.kill("SIGKILL"), 1_500);
+        }, timeoutMs);
 
-    killTimer = setTimeout(() => {
-      try {
-        child.kill("SIGKILL");
-      } catch {}
-    }, 1_500);
-  }, timeoutMs);
-
-  child.stdout.on("data", (chunk: Buffer | string) => {
+  child.stdout!.on("data", (chunk: Buffer | string) => {
     const text = String(chunk);
-    stdout += text;
-    combined += text;
-    publish({ channel: "daemon", type: "command.stdout", requestId, chunk: text, ts: now() });
+    appendOutput(job, "stdout", text);
+    appendOutput(job, "combined", text);
+    publish({ channel: "daemon", type: "command.stdout", requestId, jobId: job.id, chunk: text, ts: now() });
   });
 
-  child.stderr.on("data", (chunk: Buffer | string) => {
+  child.stderr!.on("data", (chunk: Buffer | string) => {
     const text = String(chunk);
-    stderr += text;
-    combined += text;
-    publish({ channel: "daemon", type: "command.stderr", requestId, chunk: text, ts: now() });
+    appendOutput(job, "stderr", text);
+    appendOutput(job, "combined", text);
+    publish({ channel: "daemon", type: "command.stderr", requestId, jobId: job.id, chunk: text, ts: now() });
   });
 
   const finish = (exitCode: number | null, signal: NodeJS.Signals | null): void => {
     if (finished) return;
     finished = true;
-    clearTimeout(timer);
+    if (timer) clearTimeout(timer);
     if (killTimer) {
       clearTimeout(killTimer);
       killTimer = null;
     }
 
     if (timedOut) {
-      stderr += stderr.endsWith("\n") || stderr.length === 0 ? "seed daemon: command timed out\n" : "\nseed daemon: command timed out\n";
-      combined += combined.endsWith("\n") || combined.length === 0 ? "seed daemon: command timed out\n" : "\nseed daemon: command timed out\n";
+      const note = "seed daemon: command timed out\n";
+      appendOutput(job, "stderr", job.stderr.endsWith("\n") || job.stderr.length === 0 ? note : `\n${note}`);
+      appendOutput(job, "combined", job.combined.endsWith("\n") || job.combined.length === 0 ? note : `\n${note}`);
     }
+
+    job.status = "exited";
+    job.exitCode = exitCode;
+    job.signal = signal;
 
     publish({
       channel: "daemon",
       type: "command.exit",
       requestId,
+      jobId: job.id,
       exitCode,
       signal,
       ts: now(),
     });
 
-    writeLine(conn, {
-      id: makeId(),
-      type: "exec_result",
-      replyTo: requestId,
-      ts: now(),
-      payload: {
-        exitCode,
-        signal,
-        stdout,
-        stderr,
-        combined,
-      },
-    });
+    for (const listener of job.onExit) listener();
+    job.onExit.clear();
+
+    const retention = setTimeout(() => jobs.delete(job.id), jobRetentionMs);
+    retention.unref();
   };
 
   child.once("error", (err: Error) => {
-    stderr += String(err);
-    combined += String(err);
-    finish(1, null);
+    appendOutput(job, "stderr", String(err));
+    appendOutput(job, "combined", String(err));
+    // spawn failure: the conventional "command not found / not executable" code.
+    finish(127, null);
   });
 
   child.once("close", (exitCode, signal) => {
     finish(exitCode, signal);
   });
+
+  return job;
+}
+
+function handleExec(msg: WireMessage, conn: net.Socket): void {
+  const requestId = msg.id || makeId();
+  if (msg.payload?.stdin === true && msg.payload?.detach !== true) {
+    replyError(conn, requestId, "seed daemon: stdin requires detach: true");
+    return;
+  }
+  const started = startJob({ ...msg, id: requestId });
+  if (typeof started === "string") {
+    reply(conn, "exec_result", requestId, {
+      exitCode: 1,
+      signal: null,
+      stdout: "",
+      stderr: started,
+      combined: `${started}\n`,
+    });
+    return;
+  }
+
+  if (msg.payload?.detach === true) {
+    reply(conn, "exec_result", requestId, jobSnapshot(started));
+    return;
+  }
+
+  // An attached exec's result is delivered exactly once, right here; only
+  // detached jobs need to stay addressable (wait/status/kill) after exit.
+  const send = (): void => {
+    reply(conn, "exec_result", requestId, jobSnapshot(started));
+    jobs.delete(started.id);
+  };
+  if (started.status === "exited") send();
+  else started.onExit.add(send);
+}
+
+function handleWait(msg: WireMessage, conn: net.Socket): void {
+  const requestId = msg.id || makeId();
+  const payload = msg.payload ?? {};
+  const job = jobs.get(String(payload.jobId ?? ""));
+  if (!job) {
+    replyError(conn, requestId, `seed daemon: unknown job ${String(payload.jobId ?? "")}`);
+    return;
+  }
+
+  const send = (): void => reply(conn, "exec_result", requestId, jobSnapshot(job));
+  if (job.status === "exited") {
+    send();
+    return;
+  }
+
+  const timeoutMs = Number.isFinite(payload.timeoutMs) ? Math.max(1, Number(payload.timeoutMs)) : null;
+  let timer: NodeJS.Timeout | null = null;
+  const onExit = (): void => {
+    if (timer) clearTimeout(timer);
+    send();
+  };
+  job.onExit.add(onExit);
+  if (timeoutMs !== null) {
+    timer = setTimeout(() => {
+      job.onExit.delete(onExit);
+      send();
+    }, timeoutMs);
+  }
+  conn.once("close", () => {
+    job.onExit.delete(onExit);
+    if (timer) clearTimeout(timer);
+  });
+}
+
+function handleStatus(msg: WireMessage, conn: net.Socket): void {
+  const requestId = msg.id || makeId();
+  const jobId = String(msg.payload?.jobId ?? "");
+  const job = jobs.get(jobId);
+  if (!job) {
+    replyError(conn, requestId, `seed daemon: unknown job ${jobId}`);
+    return;
+  }
+  reply(conn, "exec_result", requestId, jobSnapshot(job));
+}
+
+function resolveStdinJob(
+  msg: WireMessage,
+  conn: net.Socket,
+): { job: Job; requestId: string } | null {
+  const requestId = msg.id || makeId();
+  const jobId = String(msg.payload?.jobId ?? "");
+  const job = jobs.get(jobId);
+  if (!job) {
+    replyError(conn, requestId, `seed daemon: unknown job ${jobId}`);
+    return null;
+  }
+  if (job.status === "exited") {
+    replyError(conn, requestId, `seed daemon: job ${jobId} has exited`);
+    return null;
+  }
+  if (!job.stdin) {
+    replyError(conn, requestId, `seed daemon: job ${jobId} was not started with stdin`);
+    return null;
+  }
+  return { job, requestId };
+}
+
+function handleStdin(msg: WireMessage, conn: net.Socket): void {
+  const resolved = resolveStdinJob(msg, conn);
+  if (!resolved) return;
+  const { job, requestId } = resolved;
+  if (!job.stdinOpen || !job.stdin) {
+    replyError(conn, requestId, `seed daemon: stdin of job ${job.id} is closed`);
+    return;
+  }
+
+  const encoding = msg.payload?.encoding === "base64" ? "base64" : "utf8";
+  const data = Buffer.from(String(msg.payload?.data ?? ""), encoding);
+  // Reply only from the write callback so a flooded pipe applies backpressure
+  // to the requester instead of buffering unboundedly in the daemon.
+  job.stdin.write(data, (err) => {
+    if (err) {
+      replyError(conn, requestId, `seed daemon: stdin write failed: ${err.message}`);
+      return;
+    }
+    reply(conn, "exec_result", requestId, jobSnapshot(job));
+  });
+}
+
+function handleCloseStdin(msg: WireMessage, conn: net.Socket): void {
+  const resolved = resolveStdinJob(msg, conn);
+  if (!resolved) return;
+  const { job, requestId } = resolved;
+  if (job.stdinOpen && job.stdin) {
+    // Mark closed synchronously so a stdin write racing this request is
+    // rejected instead of writing after end.
+    job.stdinOpen = false;
+    job.stdin.end();
+  }
+  reply(conn, "exec_result", requestId, jobSnapshot(job));
+}
+
+function handleKill(msg: WireMessage, conn: net.Socket): void {
+  const requestId = msg.id || makeId();
+  const payload = msg.payload ?? {};
+  const jobId = String(payload.jobId ?? "");
+  const job = jobs.get(jobId);
+  if (!job) {
+    replyError(conn, requestId, `seed daemon: unknown job ${jobId}`);
+    return;
+  }
+  // Signal the whole process group even when the leader has exited: a shell
+  // that backgrounded a child with redirected output exits first, leaving the
+  // child alive in the group.
+  job.kill(typeof payload.signal === "string" && payload.signal ? payload.signal : "SIGTERM");
+  reply(conn, "exec_result", requestId, jobSnapshot(job));
 }
 
 function createSseServer(): Promise<{ server: http.Server; port: number }> {
@@ -375,6 +651,7 @@ async function main(): Promise<void> {
             ts: now(),
             payload: {
               state: "running",
+              version: config.version,
               pid: process.pid,
               uptime: now() - startedAt,
               sseUrl: `http://${config.sseHost}:${String(sse.port)}/events?token=${config.token}`,
@@ -425,6 +702,31 @@ async function main(): Promise<void> {
           continue;
         }
 
+        if (msg.type === "wait") {
+          handleWait({ ...msg, id }, conn);
+          continue;
+        }
+
+        if (msg.type === "status") {
+          handleStatus({ ...msg, id }, conn);
+          continue;
+        }
+
+        if (msg.type === "kill") {
+          handleKill({ ...msg, id }, conn);
+          continue;
+        }
+
+        if (msg.type === "stdin") {
+          handleStdin({ ...msg, id }, conn);
+          continue;
+        }
+
+        if (msg.type === "closeStdin") {
+          handleCloseStdin({ ...msg, id }, conn);
+          continue;
+        }
+
         if (msg.type === "stop") {
           writeLine(conn, {
             id: makeId(),
@@ -443,6 +745,8 @@ async function main(): Promise<void> {
           }, 10);
           continue;
         }
+
+        replyError(conn, id, `seed daemon: unknown message type ${String(msg.type)}`);
       }
     });
 

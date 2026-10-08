@@ -6,8 +6,9 @@
  */
 
 import * as fs from 'fs/promises';
+import { randomUUID } from 'node:crypto';
 import { defineProvider, escapeShellArg } from '@computesdk/provider';
-import type { CommandResult, SandboxInfo, CreateSandboxOptions, RunCommandOptions } from '@computesdk/provider';
+import type { CommandResult, SandboxInfo, CreateSandboxOptions, RunCommandOptions, ListSnapshotsOptions } from '@computesdk/provider';
 
 /**
  * Namespace sandbox instance
@@ -19,6 +20,44 @@ export interface NamespaceSandbox {
   token: string;
   targetContainerName: string;
   createdAt: Date;
+  /** Instance lifecycle state from InstanceMetadata.status, lowercased (e.g. 'running', 'destroying'). */
+  status?: string;
+  /** Mountpoint of the persistent volume seeded from a snapshot, when created via snapshotId. */
+  snapshotVolumeMountPoint?: string;
+}
+
+/**
+ * Proto enum values of InstanceMetadata.Status that mean the instance is gone
+ * or going away. JSON transcoding emits the enum either as its name
+ * ('DESTROYED') or its number (4 = DESTROYED, 5 = DESTROYING).
+ */
+const GONE_INSTANCE_STATUSES = new Set<string | number>(['DESTROYED', 'DESTROYING', 4, 5]);
+
+/** InstanceMetadata.Status names by proto number, for numeric encodings. */
+const INSTANCE_STATUS_NAMES: Record<number, string> = {
+  1: 'pending',
+  2: 'creating',
+  3: 'running',
+  4: 'destroyed',
+  5: 'destroying',
+  6: 'suspending',
+  7: 'suspended',
+  8: 'error',
+};
+
+function instanceStatus(
+  metadata: { status?: string | number } | undefined,
+): string | undefined {
+  const status = metadata?.status;
+  if (typeof status === 'string') return status.toLowerCase();
+  if (typeof status === 'number') return INSTANCE_STATUS_NAMES[status] ?? 'unknown';
+  return undefined;
+}
+
+function isGoneInstance(
+  metadata: { status?: string | number } | undefined,
+): boolean {
+  return metadata?.status !== undefined && GONE_INSTANCE_STATUSES.has(metadata.status);
 }
 
 /**
@@ -55,6 +94,18 @@ const API_ENDPOINTS = {
 const COMMAND_SERVICE = {
   RUN_COMMAND_SYNC: '/namespace.cloud.compute.v1beta.CommandService/RunCommandSync',
 };
+
+const STORAGE_SERVICE = {
+  LIST_PERSISTENT_VOLUMES: '/namespace.cloud.compute.v1beta.StorageService/ListPersistentVolumes',
+  LIST_PERSISTENT_VOLUME_SNAPSHOTS: '/namespace.cloud.compute.v1beta.StorageService/ListPersistentVolumeSnapshots',
+  DESTROY_PERSISTENT_VOLUME_SNAPSHOT: '/namespace.cloud.compute.v1beta.StorageService/DestroyPersistentVolumeSnapshot',
+};
+
+/**
+ * Mountpoint for the persistent volume attached when `create({ snapshotId })`
+ * restores a sandbox — this is where the snapshotted filesystem state lands.
+ */
+const SNAPSHOT_VOLUME_MOUNTPOINT = '/computesdk-data';
 
 /**
  * Load bearer token from a JSON token file (e.g. from `nsc login`)
@@ -143,6 +194,17 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
               machine_arch: config.machineArch || 'amd64',
               os: config.os || 'linux'
             },
+            // snapshotId restores filesystem state by seeding a new
+            // persistent volume from the given snapshot — Namespace's
+            // fork model is volume-backed rather than whole-instance.
+            ...(options?.snapshotId && {
+              volumes: [{
+                mount_point: SNAPSHOT_VOLUME_MOUNTPOINT,
+                tag: `computesdk-${randomUUID().slice(0, 8)}`,
+                persistency_kind: 'PERSISTENT',
+                from_snapshot_id: options.snapshotId,
+              }],
+            }),
             containers: [{
               name: containerName,
               ...(image === undefined
@@ -151,7 +213,15 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
               args: ['sleep', 'infinity'],
               ...(options?.envs && Object.keys(options.envs).length > 0 && {
                 environment: options.envs
-              })
+              }),
+              // Mounts the instance's managed dockerd socket (e.g.
+              // '/var/run/docker.sock') so the container can drive Docker —
+              // the daemon runs on the micro-VM, not inside the container,
+              // which needs no elevated container privileges.
+              ...(typeof options?.dockerSockPath === 'string' &&
+                options.dockerSockPath !== '' && {
+                  docker_sock_path: options.dockerSockPath
+                })
             }],
             documented_purpose: config.documentedPurpose || 'ComputeSDK sandbox',
             deadline: new Date(Date.now() + 60 * 60 * 1000).toISOString()
@@ -176,6 +246,7 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
             token,
             targetContainerName: containerName,
             createdAt: new Date(),
+            ...(options?.snapshotId && { snapshotVolumeMountPoint: SNAPSHOT_VOLUME_MOUNTPOINT }),
           };
 
           return { sandbox, sandboxId: instanceId };
@@ -199,6 +270,11 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
             throw new Error('Instance data is missing from Namespace response');
           }
 
+          // A destroyed instance stays describable (its status moves to
+          // DESTROYING/DESTROYED, NotFound only comes later) — absent the
+          // status check, callers confirming a deletion see it alive forever.
+          if (isGoneInstance(responseData.metadata)) return null;
+
           const instanceId = responseData.metadata.instanceId;
           const sandbox: NamespaceSandbox = {
             instanceId,
@@ -207,6 +283,7 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
             token,
             targetContainerName: config.targetContainerName || 'main-container',
             createdAt: responseData.metadata?.createdAt ? new Date(responseData.metadata.createdAt) : new Date(0),
+            status: instanceStatus(responseData.metadata),
           };
 
           return { sandbox, sandboxId: instanceId };
@@ -230,7 +307,11 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
           const instances = responseData?.instances || [];
 
           return instances
-            .filter((instanceData: any) => instanceData.instanceId || instanceData.metadata?.instanceId)
+            .filter(
+              (instanceData: any) =>
+                (instanceData.instanceId || instanceData.metadata?.instanceId) &&
+                !isGoneInstance(instanceData.metadata),
+            )
             .map((instanceData: any) => {
               const instanceId = instanceData.instanceId || instanceData.metadata.instanceId;
               const sandbox: NamespaceSandbox = {
@@ -240,6 +321,7 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
                 token,
                 targetContainerName: config.targetContainerName || 'main-container',
                 createdAt: instanceData.metadata?.createdAt ? new Date(instanceData.metadata.createdAt) : new Date(0),
+                status: instanceStatus(instanceData.metadata),
               };
               return { sandbox, sandboxId: instanceId };
             });
@@ -254,19 +336,17 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
         const { token } = await getAndValidateCredentials(config);
 
         try {
-          const data = await fetchNamespace(token, API_ENDPOINTS.DESTROY_INSTANCE, {
+          await fetchNamespace(token, API_ENDPOINTS.DESTROY_INSTANCE, {
             method: 'POST',
             body: JSON.stringify({
               instance_id: sandboxId,
               reason: config.destroyReason || "ComputeSDK cleanup"
             })
           });
-
-          if (data.error) {
-            console.warn(`Namespace destroy warning: ${data.error}`);
-          }
         } catch (error) {
-          console.warn(`Namespace destroy warning: ${error instanceof Error ? error.message : String(error)}`);
+          throw new Error(
+            `Failed to destroy Namespace instance: ${error instanceof Error ? error.message : String(error)}`
+          );
         }
       },
 
@@ -334,15 +414,46 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
       },
 
       getInfo: async (sandbox: NamespaceSandbox): Promise<SandboxInfo> => {
+        // The handle's status is a snapshot; describe the instance live so a
+        // long-held handle sees suspensions and destruction as they happen.
+        try {
+          const responseData = await fetchNamespace(sandbox.token, API_ENDPOINTS.DESCRIBE_INSTANCE, {
+            method: 'POST',
+            body: JSON.stringify({ instance_id: sandbox.instanceId })
+          });
+          sandbox.status = instanceStatus(responseData.metadata);
+        } catch (error) {
+          if (error instanceof Error && error.message.includes('404')) {
+            // DescribeInstance only reaches NotFound once the terminal
+            // statuses have passed — the instance is gone either way.
+            sandbox.status = 'destroyed';
+          } else {
+            throw new Error(
+              `Failed to get Namespace instance info: ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+        }
+
         return {
           id: sandbox.instanceId,
           provider: 'namespace',
-          status: 'running',
+          status:
+            sandbox.status === 'error'
+              ? 'error'
+              : sandbox.status === 'destroyed' ||
+                  sandbox.status === 'destroying' ||
+                  sandbox.status === 'suspended' ||
+                  sandbox.status === 'suspending'
+                ? 'stopped'
+                : 'running',
           createdAt: sandbox.createdAt,
           timeout: 0,
           metadata: {
             name: sandbox.name,
             commandServiceEndpoint: sandbox.commandServiceEndpoint,
+            ...(sandbox.snapshotVolumeMountPoint && {
+              snapshotVolumeMountPoint: sandbox.snapshotVolumeMountPoint,
+            }),
           }
         };
       },
@@ -352,6 +463,84 @@ export const namespace = defineProvider<NamespaceSandbox, NamespaceConfig>({
       },
 
       getInstance: (sandbox: NamespaceSandbox): NamespaceSandbox => sandbox,
-    }
+    },
+
+    // Namespace snapshots are volume-backed: persistent volumes are
+    // snapshotted automatically on instance shutdown, and a new volume can be
+    // seeded from a snapshot via VolumeRequest.from_snapshot_id.
+    snapshot: {
+      create: async () => {
+        throw new Error(
+          'Namespace cannot create snapshots on demand — persistent-volume snapshots are captured automatically when an instance with a PERSISTENT volume shuts down. Create a sandbox with a persistent volume (snapshotId path) and list snapshots after it stops.'
+        );
+      },
+
+      list: async (config: NamespaceConfig, options?: ListSnapshotsOptions) => {
+        const { token } = await getAndValidateCredentials(config);
+
+        try {
+          // Instance -> volume mapping is not exposed, so snapshots are
+          // collected across all persistent volumes in the workspace.
+          interface WireVolume { id: string; tag?: string; site?: string }
+          const volumes: WireVolume[] = [];
+          let cursor: string | undefined;
+          do {
+            const response = await fetchNamespace(token, STORAGE_SERVICE.LIST_PERSISTENT_VOLUMES, {
+              method: 'POST',
+              body: JSON.stringify(cursor ? { pagination_cursor: cursor } : {})
+            });
+            volumes.push(...(response.volumes || []));
+            cursor = response.pagination_cursor || undefined;
+          } while (cursor);
+
+          const snapshots = [];
+          for (const volume of volumes) {
+            const response = await fetchNamespace(token, STORAGE_SERVICE.LIST_PERSISTENT_VOLUME_SNAPSHOTS, {
+              method: 'POST',
+              body: JSON.stringify({ id: volume.id })
+            });
+            for (const snap of response.snapshots || []) {
+              // attached_instance_id links a snapshot back to the instance
+              // whose volume produced it.
+              if (options?.sandboxId && snap.attached_instance_id !== options.sandboxId) continue;
+              snapshots.push({
+                id: snap.id,
+                provider: 'namespace',
+                createdAt: snap.created_at ? new Date(snap.created_at) : new Date(0),
+                metadata: {
+                  volumeId: volume.id,
+                  ...(volume.tag && { volumeTag: volume.tag }),
+                  ...(volume.site && { site: volume.site }),
+                  ...(snap.attached_instance_id && { sourceInstance: snap.attached_instance_id }),
+                  ...(snap.abandoned_at && { abandoned: 'true' }),
+                },
+              });
+            }
+          }
+
+          snapshots.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+          return options?.limit ? snapshots.slice(0, options.limit) : snapshots;
+        } catch (error) {
+          throw new Error(
+            `Failed to list Namespace snapshots: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      },
+
+      delete: async (config: NamespaceConfig, snapshotId: string) => {
+        const { token } = await getAndValidateCredentials(config);
+
+        try {
+          await fetchNamespace(token, STORAGE_SERVICE.DESTROY_PERSISTENT_VOLUME_SNAPSHOT, {
+            method: 'POST',
+            body: JSON.stringify({ id: snapshotId })
+          });
+        } catch (error) {
+          throw new Error(
+            `Failed to delete Namespace snapshot: ${error instanceof Error ? error.message : String(error)}`
+          );
+        }
+      },
+    },
   }
 });

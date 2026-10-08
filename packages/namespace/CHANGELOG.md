@@ -1,5 +1,94 @@
 # @computesdk/namespace
 
+## 1.6.22
+
+### Patch Changes
+
+- ecde591: Fix snapshot handling in the Blaxel, Archil, and Namespace providers
+
+  - `@computesdk/blaxel`: `sandbox.create({ snapshotId })` now forks a new
+    sandbox from the workspace snapshot via `Snapshot.get(id).fork(...)`
+    instead of treating the id as a live sandbox (`sandboxId` still resumes a
+    live sandbox). The snapshot manager now maps to Blaxel's real snapshot
+    resources (`Snapshot.create/list/delete`, `sandbox.snapshots`) instead of
+    treating sandbox instances as snapshots.
+  - `@computesdk/archil`: `sandbox.create({ snapshotId })` forks a new sandbox
+    from the source sandbox via `POST /api/sandboxes/{id}/fork` (persistent
+    mode); `sandboxId` attaches to a live sandbox or disk. Added a snapshot
+    manager where `create` forks the source sandbox and `delete` removes the
+    backing sandbox (snapshot listing is unsupported — Archil has no snapshot
+    resource).
+  - `@computesdk/namespace`: `sandbox.create({ snapshotId })` restores
+    filesystem state by attaching a new PERSISTENT volume seeded via
+    `VolumeRequest.from_snapshot_id` (mounted at `/computesdk-data`). Added a
+    snapshot manager over the `StorageService` API: `list` enumerates
+    persistent-volume snapshots and `delete` abandons one. `create` throws —
+    Namespace snapshots are captured automatically on instance shutdown, never
+    on demand.
+
+## 1.6.21
+
+### Patch Changes
+
+- computesdk@4.1.8
+- @computesdk/provider@2.1.9
+
+## 1.6.20
+
+### Patch Changes
+
+- 6096b4d: fix(namespace): report destroyed instances as gone
+
+  DescribeInstance keeps returning an instance while it is DESTROYING or
+  DESTROYED — NotFound only comes later — so getById (and list) saw deleted
+  sandboxes as alive forever. getById now maps InstanceMetadata.status
+  DESTROYING/DESTROYED (name or number encoding) to null, list filters them,
+  NamespaceSandbox carries the lowercased status into getInfo, and destroy
+  rejects on API failure instead of warning-and-succeeding.
+
+- e110bfa: fix(namespace): refresh instance status in getInfo
+
+  getInfo returned the status snapshot captured when the handle was
+  attached, so a long-held handle kept reporting running after the
+  instance was suspended, errored, or destroyed. getInfo now describes
+  the instance live: terminal and suspended states map to stopped, a
+  describe 404 maps to stopped (NotFound only arrives once the terminal
+  statuses have passed), and the refreshed state is written back onto the
+  handle. Unrecognized or future statuses fall back to running instead of
+  reading as stopped.
+
+## 1.6.19
+
+### Patch Changes
+
+- Updated dependencies [7e65fe7]
+  - @computesdk/provider@2.1.8
+  - computesdk@4.1.7
+
+## 1.6.18
+
+### Patch Changes
+
+- deca747: feat(namespace): support `dockerSockPath` create option to mount the instance's managed dockerd socket
+
+  Setting `dockerSockPath` (e.g. `/var/run/docker.sock`) on `sandbox.create` sets `docker_sock_path` on the container, so containers can drive the instance's managed Docker daemon without needing elevated privileges to run dockerd inside the container.
+
+## 1.6.17
+
+### Patch Changes
+
+- Updated dependencies [0732fed]
+  - computesdk@4.1.6
+  - @computesdk/provider@2.1.7
+
+## 1.6.16
+
+### Patch Changes
+
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - @computesdk/provider@2.1.6
+
 ## 1.6.15
 
 ### Patch Changes

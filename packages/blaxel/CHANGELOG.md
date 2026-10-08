@@ -1,5 +1,79 @@
 # @computesdk/blaxel
 
+## 1.6.26
+
+### Patch Changes
+
+- ecde591: Fix snapshot handling in the Blaxel, Archil, and Namespace providers
+
+  - `@computesdk/blaxel`: `sandbox.create({ snapshotId })` now forks a new
+    sandbox from the workspace snapshot via `Snapshot.get(id).fork(...)`
+    instead of treating the id as a live sandbox (`sandboxId` still resumes a
+    live sandbox). The snapshot manager now maps to Blaxel's real snapshot
+    resources (`Snapshot.create/list/delete`, `sandbox.snapshots`) instead of
+    treating sandbox instances as snapshots.
+  - `@computesdk/archil`: `sandbox.create({ snapshotId })` forks a new sandbox
+    from the source sandbox via `POST /api/sandboxes/{id}/fork` (persistent
+    mode); `sandboxId` attaches to a live sandbox or disk. Added a snapshot
+    manager where `create` forks the source sandbox and `delete` removes the
+    backing sandbox (snapshot listing is unsupported — Archil has no snapshot
+    resource).
+  - `@computesdk/namespace`: `sandbox.create({ snapshotId })` restores
+    filesystem state by attaching a new PERSISTENT volume seeded via
+    `VolumeRequest.from_snapshot_id` (mounted at `/computesdk-data`). Added a
+    snapshot manager over the `StorageService` API: `list` enumerates
+    persistent-volume snapshots and `delete` abandons one. `create` throws —
+    Namespace snapshots are captured automatically on instance shutdown, never
+    on demand.
+
+## 1.6.25
+
+### Patch Changes
+
+- computesdk@4.1.8
+- @computesdk/provider@2.1.9
+
+## 1.6.24
+
+### Patch Changes
+
+- Updated dependencies [7e65fe7]
+  - @computesdk/provider@2.1.8
+  - computesdk@4.1.7
+
+## 1.6.23
+
+### Patch Changes
+
+- 7415b62: fix(blaxel): capture runCommand output via the live log stream while the process runs
+
+  On Mark 3 infra, process output isn't retained for the `logs` GET after the process exits — `exec` returns `status: 'running'`, the process finishes, and every post-hoc read stays empty. `executeWithStreaming` now attaches `process.streamLogs(pid)` before polling to a terminal state, so output emitted while the process finishes is captured live. Post-completion `logs(pid)` remains as a fallback.
+
+## 1.6.22
+
+### Patch Changes
+
+- febe062: fix(blaxel): wait for process completion before recovering runCommand output
+
+  On current Blaxel infra, `process.exec` returns promptly with `status: 'running'` even with `waitForCompletion: true`, leaving all output fields empty. `executeWithStreaming` now polls `process.wait(pid)` to a terminal state (bounded by the command timeout, 5 min default) before falling back to `process.logs(pid)`, and best-effort kills the process if the wait times out.
+
+## 1.6.21
+
+### Patch Changes
+
+- a1406e4: Fix `runCommand` returning empty `stdout`: pass `onStdout`/`onStderr` callbacks so `@blaxel/core` uses its `execWithStreaming` path (handles `stdout`, `stderr`, `logs`, and streamed `result` events), fall back to `process.logs(pid)` when output is empty, and report a nonzero exit code when the API returns `status: "failed"`.
+- Updated dependencies [0732fed]
+  - computesdk@4.1.6
+  - @computesdk/provider@2.1.7
+
+## 1.6.20
+
+### Patch Changes
+
+- Updated dependencies [3914faa]
+  - computesdk@4.1.5
+  - @computesdk/provider@2.1.6
+
 ## 1.6.19
 
 ### Patch Changes
